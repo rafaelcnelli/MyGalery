@@ -1,0 +1,6 @@
+{
+  "name": "Sonoma Web OS — App Launcher & Creation Hub",
+  "description": "Web App OS Launcher & Hub de Criações estilo macOS Sonoma e Raycast com grid livre de 40 slots sem sobreposição, captura automática de logos, Live Preview multi-viewport e sincronização na nuvem via Firebase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

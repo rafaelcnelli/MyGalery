@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#020617" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+
+    <!-- Glowing Rim Gradient -->
+    <linearGradient id="rimGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8" />
+      <stop offset="50%" stop-color="#c084fc" />
+      <stop offset="100%" stop-color="#22d3ee" />
+    </linearGradient>
+
+    <!-- Hub Accent Gradient -->
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#8b5cf6" />
+    </linearGradient>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- macOS Sonoma Squircle Background -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bgGrad)" stroke="url(#rimGrad)" stroke-width="12" />
+
+  <!-- Inner Ambient Glow -->
+  <circle cx="256" cy="180" r="140" fill="#6366f1" opacity="0.25" filter="url(#glow)" />
+  <circle cx="340" cy="320" r="120" fill="#06b6d4" opacity="0.2" filter="url(#glow)" />
+
+  <!-- App Grid / Hub Center Icon -->
+  <g transform="translate(136, 136)">
+    <!-- Top-Left Tile -->
+    <rect x="0" y="0" width="104" height="104" rx="28" fill="url(#accentGrad)" opacity="0.95" />
+    <circle cx="52" cy="52" r="18" fill="#ffffff" opacity="0.9" />
+
+    <!-- Top-Right Tile -->
+    <rect x="136" y="0" width="104" height="104" rx="28" fill="#06b6d4" opacity="0.9" />
+    <!-- Sphere Orbit Accent in Top-Right -->
+    <circle cx="188" cy="52" r="24" stroke="#ffffff" stroke-width="6" fill="none" opacity="0.95" />
+    <circle cx="188" cy="52" r="8" fill="#ffffff" />
+
+    <!-- Bottom-Left Tile -->
+    <rect x="0" y="136" width="104" height="104" rx="28" fill="#ec4899" opacity="0.9" />
+    <path d="M 52 166 L 70 196 L 34 196 Z" fill="#ffffff" opacity="0.95" />
+
+    <!-- Bottom-Right Tile -->
+    <rect x="136" y="136" width="104" height="104" rx="28" fill="#10b981" opacity="0.9" />
+    <rect x="170" y="170" width="36" height="36" rx="8" fill="#ffffff" opacity="0.95" />
+  </g>
+</svg>

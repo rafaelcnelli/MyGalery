@@ -1,0 +1,122 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Configuration and global preferences for a user's Web App OS Launcher hub.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the workspace owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hubTitle": {
+          "type": "string",
+          "description": "Custom editable title displayed in the top dock.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "theme": {
+          "type": "string",
+          "description": "Selected wallpaper theme identifier.",
+          "enum": ["aurora", "midnight", "cyber", "ocean"],
+          "maxLength": 20
+        },
+        "clickBehavior": {
+          "type": "string",
+          "description": "Primary click action on app icons.",
+          "enum": ["preview", "new_tab"],
+          "maxLength": 20
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when workspace was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when workspace was last updated."
+        }
+      },
+      "required": ["uid", "hubTitle", "theme", "clickBehavior", "createdAt", "updatedAt"]
+    },
+    "WebAppItem": {
+      "title": "WebAppItem",
+      "description": "A registered web application positioned in a specific slot of the 40-slot OS grid.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the web app item.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns this app.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the web application.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "url": {
+          "type": "string",
+          "description": "Normalized HTTPS URL of the web application.",
+          "minLength": 4,
+          "maxLength": 500
+        },
+        "category": {
+          "type": "string",
+          "description": "Category tag for the application.",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "accentColor": {
+          "type": "string",
+          "description": "Accent color key used for icon glow and monogram fallback.",
+          "enum": ["indigo", "violet", "cyan", "emerald", "amber", "rose", "blue", "fuchsia"],
+          "maxLength": 24
+        },
+        "customLogoUrl": {
+          "type": "string",
+          "description": "Optional custom logo URL overriding automatic favicon extraction.",
+          "maxLength": 500
+        },
+        "slotIndex": {
+          "type": "number",
+          "description": "Fixed coordinate index in the 40-slot desktop grid (0 to 39)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the app item was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the app item was last modified."
+        }
+      },
+      "required": ["id", "ownerId", "name", "url", "category", "accentColor", "customLogoUrl", "slotIndex", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/workspaces/{userId}": {
+      "schema": { "$ref": "#/entities/UserWorkspace" },
+      "description": "Stores each authenticated user's launcher configuration and preferences."
+    },
+    "/workspaces/{userId}/apps/{appId}": {
+      "schema": { "$ref": "#/entities/WebAppItem" },
+      "description": "Subcollection storing all web app items and their grid slot coordinates for a specific user."
+    }
+  }
+}

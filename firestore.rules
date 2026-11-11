@@ -1,0 +1,144 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Master Gate relational lookup for subcollections
+    function isWorkspaceMasterOwner(userId) {
+      return exists(/databases/$(database)/documents/workspaces/$(userId)) &&
+        get(/databases/$(database)/documents/workspaces/$(userId)).data.uid == request.auth.uid;
+    }
+
+    // Validation Blueprint: UserWorkspace
+    function isValidWorkspace(data, userId) {
+      return data.keys().hasAll(['uid', 'hubTitle', 'theme', 'clickBehavior', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'hubTitle', 'theme', 'clickBehavior', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid == request.auth.uid && data.uid == userId &&
+        data.hubTitle is string && data.hubTitle.size() >= 1 && data.hubTitle.size() <= 80 &&
+        data.theme is string && data.theme.size() <= 20 &&
+        data.theme in ['aurora', 'midnight', 'cyber', 'ocean'] &&
+        data.clickBehavior is string && data.clickBehavior.size() <= 20 &&
+        data.clickBehavior in ['preview', 'new_tab'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: WebAppItem
+    function isValidWebAppItem(data, userId, appId) {
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'url', 'category', 'accentColor', 'customLogoUrl', 'slotIndex', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerId', 'name', 'url', 'category', 'accentColor', 'customLogoUrl', 'slotIndex', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.id == appId &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+        data.ownerId == request.auth.uid && data.ownerId == userId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.url is string && data.url.size() >= 4 && data.url.size() <= 500 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+        data.accentColor is string && data.accentColor.size() <= 24 &&
+        data.accentColor in ['indigo', 'violet', 'cyan', 'emerald', 'amber', 'rose', 'blue', 'fuchsia'] &&
+        data.customLogoUrl is string && data.customLogoUrl.size() <= 500 &&
+        data.slotIndex is int && data.slotIndex >= 0 && data.slotIndex <= 39 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Workspace Document Rules
+    match /workspaces/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
+
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        userId == request.auth.uid &&
+        isValidWorkspace(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        userId == request.auth.uid &&
+        isValidWorkspace(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action: Update Preferences (title, theme, clickBehavior)
+          incoming().diff(existing()).affectedKeys().hasOnly(['hubTitle', 'theme', 'clickBehavior', 'updatedAt'])
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && existing().uid == request.auth.uid;
+
+      // Subcollection: WebAppItems
+      match /apps/{appId} {
+        allow get: if isSignedIn() &&
+          isValidId(userId) &&
+          isValidId(appId) &&
+          userId == request.auth.uid &&
+          existing().ownerId == request.auth.uid &&
+          isWorkspaceMasterOwner(userId);
+
+        // Pillar 8: Secure List Queries (No get/exists in allow list)
+        allow list: if isSignedIn() &&
+          userId == request.auth.uid &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(appId) &&
+          userId == request.auth.uid &&
+          isValidWebAppItem(incoming(), userId, appId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMasterOwner(userId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(appId) &&
+          userId == request.auth.uid &&
+          isValidWebAppItem(incoming(), userId, appId) &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            // Action 1: Reposition / Swap Slot in Grid
+            incoming().diff(existing()).affectedKeys().hasOnly(['slotIndex', 'updatedAt']) ||
+            // Action 2: Edit App Metadata & Details
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'url', 'category', 'accentColor', 'customLogoUrl', 'slotIndex', 'updatedAt'])
+          ) &&
+          isWorkspaceMasterOwner(userId);
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(appId) &&
+          userId == request.auth.uid &&
+          existing().ownerId == request.auth.uid &&
+          isWorkspaceMasterOwner(userId);
+      }
+    }
+  }
+}
