@@ -20,16 +20,16 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: '/',
-          name: 'Sonoma Web OS — App Launcher & Creation Hub',
-          short_name: 'SonomaOS',
+          id: './',
+          name: 'Apps Hub',
+          short_name: 'Apps Hub',
           description:
-            'Web App OS Launcher & Hub de Criações estilo macOS Sonoma e Raycast com grid livre, esfera 3D, Live Preview e sincronização na nuvem.',
+            'Apps Hub — Web App OS Launcher & Hub de Criações com grid livre, esfera 3D, Live Preview e sincronização na nuvem.',
           theme_color: '#020617',
           background_color: '#020617',
           display: 'standalone',
-          start_url: '/',
-          scope: '/',
+          start_url: './',
+          scope: './',
           icons: [
             {
               src: 'pwa-192x192.png',

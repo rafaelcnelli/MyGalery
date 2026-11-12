@@ -64,7 +64,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
                     id="pwa-install-title"
                     className="font-display font-semibold text-sm sm:text-base text-white"
                   >
-                    Instalar Sonoma Web OS (PWA)
+                    Instalar Apps Hub (PWA)
                   </h3>
                   <p className="text-xs text-slate-400">
                     Use como aplicativo nativo em tela cheia e offline
@@ -111,7 +111,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
                     <span>No Desktop (Chrome, Edge ou Brave):</span>
                   </div>
                   <p className="leading-relaxed text-slate-300">
-                    Clique no ícone de <strong>Instalar Sonoma Web OS</strong> localizado no lado direito da barra de endereços do navegador (ou abra a aplicação em uma nova aba fora do preview para habilitar o botão direto).
+                    Clique no ícone de <strong>Instalar Apps Hub</strong> localizado no lado direito da barra de endereços do navegador (ou abra a aplicação em uma nova aba fora do preview para habilitar o botão direto).
                   </p>
                 </div>
 
