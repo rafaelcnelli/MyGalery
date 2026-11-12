@@ -8,11 +8,14 @@
     --font-mono: 'JetBrains Mono', monospace;
   }
 
-  body {
+  html, body {
     font-family: var(--font-sans);
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     user-select: none;
     -webkit-font-smoothing: antialiased;
+    touch-action: manipulation;
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
   }
 
   h1, h2, h3, .font-display {

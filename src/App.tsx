@@ -43,6 +43,7 @@ import { DesktopGrid } from './components/DesktopGrid';
 import { SphereView } from './components/SphereView';
 import { AppFormModal } from './components/AppFormModal';
 import { LivePreviewModal } from './components/LivePreviewModal';
+import { AppSpotlightModal } from './components/AppSpotlightModal';
 import { CloudSyncModal } from './components/CloudSyncModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 
@@ -81,6 +82,8 @@ function loadInitialState(): LauncherState {
         : INITIAL_DEMO_APPS;
 
     const validCols: GridColumnsPerRow =
+      parsed.gridColumns === 2 ||
+      parsed.gridColumns === 3 ||
       parsed.gridColumns === 4 ||
       parsed.gridColumns === 6 ||
       parsed.gridColumns === 8
@@ -97,7 +100,10 @@ function loadInitialState(): LauncherState {
         parsed.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
       viewMode: parsed.viewMode === 'sphere' ? 'sphere' : 'grid',
       gridColumns: validCols,
-      gridScale: parsed.gridScale === 'compact' ? 'compact' : 'normal',
+      gridScale:
+        parsed.gridScale === 'xs' || parsed.gridScale === 'compact'
+          ? parsed.gridScale
+          : 'normal',
       cloudRestUrl: parsed.cloudRestUrl || '',
       apps,
       lastSyncedAt: parsed.lastSyncedAt || null,
@@ -123,10 +129,11 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [isOrganizeMode, setIsOrganizeMode] = useState(false);
 
-  // Modals state
+  // Modals & Spotlight state
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [editingApp, setEditingApp] = useState<WebAppItem | null>(null);
   const [targetNewSlot, setTargetNewSlot] = useState<number | null>(null);
+  const [highlightedAppId, setHighlightedAppId] = useState<string | null>(null);
   const [previewingApp, setPreviewingApp] = useState<WebAppItem | null>(null);
   const [isCloudModalOpen, setIsCloudModalOpen] = useState(false);
 
@@ -233,7 +240,6 @@ export default function App() {
 
     const initFirestoreSync = async () => {
       try {
-        // Ensure parent workspace doc exists FIRST so Master Gate rules succeed
         await ensureOrUpdateWorkspaceDoc(uid, {
           hubTitle: stateRef.current.hubTitle,
           theme: stateRef.current.theme,
@@ -280,7 +286,6 @@ export default function App() {
         (snapshot) => {
           if (snapshot.empty && !hasSeededInitial) {
             hasSeededInitial = true;
-            // Seed existing local apps to user's Firestore workspace on first login
             seedAppsToFirestore(uid, stateRef.current.apps).catch(() => {});
             return;
           }
@@ -383,7 +388,6 @@ export default function App() {
           setSyncStatus('online');
           showToast('Galeria sincronizada da nuvem com sucesso!');
         } else {
-          // Remote database is empty -> initialize it with current state
           await pushToCloudRest(stateRef.current, endpoint);
         }
       } catch (err) {
@@ -515,6 +519,9 @@ export default function App() {
   };
 
   const handleDeleteApp = (appId: string) => {
+    if (highlightedAppId === appId) {
+      setHighlightedAppId(null);
+    }
     setState((prev) => {
       const target = prev.apps.find((a) => a.id === appId);
       const updatedApps = prev.apps.filter((a) => a.id !== appId);
@@ -531,18 +538,9 @@ export default function App() {
     });
   };
 
+  // Clicking an app highlights it in Spotlight with Edit Icon + Bottom Action Buttons
   const handlePrimaryAppClick = (app: WebAppItem) => {
-    if (state.clickBehavior === 'preview') {
-      setPreviewingApp(app);
-    } else {
-      const anchor = document.createElement('a');
-      anchor.href = app.url;
-      anchor.target = '_blank';
-      anchor.rel = 'noopener noreferrer';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-    }
+    setHighlightedAppId(app.id);
   };
 
   const handleSyncNow = async () => {
@@ -627,9 +625,13 @@ export default function App() {
   const currentWallpaper =
     WALLPAPER_THEMES[state.theme] || WALLPAPER_THEMES.aurora;
 
+  const highlightedApp = highlightedAppId
+    ? state.apps.find((a) => a.id === highlightedAppId) || null
+    : null;
+
   return (
     <div
-      className={`relative h-screen w-screen overflow-hidden flex flex-col ${currentWallpaper.baseBg} text-slate-100 select-none`}
+      className={`relative h-dvh w-screen overflow-hidden flex flex-col ${currentWallpaper.baseBg} text-slate-100 select-none`}
     >
       {/* Ambient Radial Diffused Backlights per Wallpaper Theme */}
       <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
@@ -712,6 +714,7 @@ export default function App() {
           apps={state.apps}
           matchingAppIds={matchingAppIds}
           hasActiveFilter={hasActiveFilter}
+          highlightedAppId={highlightedAppId}
           onPrimaryAppClick={handlePrimaryAppClick}
           onOpenLivePreview={(app) => setPreviewingApp(app)}
           onOpenEditModal={(app) => {
@@ -733,6 +736,7 @@ export default function App() {
           isOrganizeMode={isOrganizeMode}
           gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
           gridScale={(state.gridScale || 'normal') as GridScale}
+          highlightedAppId={highlightedAppId}
           onPrimaryAppClick={handlePrimaryAppClick}
           onOpenLivePreview={(app) => setPreviewingApp(app)}
           onOpenEditModal={(app) => {
@@ -763,6 +767,18 @@ export default function App() {
         </div>
       )}
 
+      {/* Highlighted App Spotlight Modal (Edit Icon + Open in App / Open in Browser) */}
+      <AppSpotlightModal
+        app={highlightedApp}
+        onClose={() => setHighlightedAppId(null)}
+        onOpenInApp={(app) => setPreviewingApp(app)}
+        onOpenEdit={(app) => {
+          setEditingApp(app);
+          setTargetNewSlot(app.slotIndex);
+          setIsFormModalOpen(true);
+        }}
+      />
+
       {/* + Novo Web App / Edit Modal */}
       <AppFormModal
         isOpen={isFormModalOpen}
@@ -779,7 +795,7 @@ export default function App() {
         onDelete={handleDeleteApp}
       />
 
-      {/* macOS Sonoma Live Preview Window */}
+      {/* macOS Sonoma / Full-Screen Mobile Live Preview Window */}
       <LivePreviewModal
         app={previewingApp}
         onClose={() => setPreviewingApp(null)}

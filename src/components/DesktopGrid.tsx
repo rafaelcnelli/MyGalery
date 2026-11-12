@@ -22,6 +22,7 @@ interface DesktopGridProps {
   isOrganizeMode: boolean;
   gridColumns: GridColumnsPerRow;
   gridScale: GridScale;
+  highlightedAppId?: string | null;
   onPrimaryAppClick: (app: WebAppItem) => void;
   onOpenLivePreview: (app: WebAppItem) => void;
   onOpenEditModal: (app: WebAppItem) => void;
@@ -36,6 +37,7 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
   isOrganizeMode,
   gridColumns,
   gridScale,
+  highlightedAppId,
   onPrimaryAppClick,
   onOpenLivePreview,
   onOpenEditModal,
@@ -186,6 +188,7 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
           const isBeingDragged = occupant && draggedAppId === occupant.id;
           const isSelectedForMove =
             occupant && selectedForMoveAppId === occupant.id;
+          const isHighlighted = occupant && highlightedAppId === occupant.id;
           const isMatched = occupant
             ? matchingAppIds.has(occupant.id)
             : false;
@@ -206,7 +209,9 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
                     ? 'bg-indigo-500/20 border-2 border-dashed border-indigo-400 scale-[1.02]'
                     : isSelectedForMove
                       ? 'bg-amber-500/15 border-2 border-amber-400/60'
-                      : 'border border-transparent'
+                      : isHighlighted
+                        ? 'bg-indigo-500/20 border-2 border-indigo-400 shadow-[0_0_28px_rgba(99,102,241,0.35)] scale-[1.04] z-20'
+                        : 'border border-transparent'
                   : isDropTarget
                     ? 'border-2 border-dashed border-indigo-400 bg-indigo-500/15 scale-[1.02]'
                     : showEmptySlotGuides
@@ -248,8 +253,14 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
                     </div>
                   )}
 
-                  {/* Floating Quick Action Menu on Hover */}
-                  <div className="absolute top-1 right-1 z-20 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150 bg-slate-950/90 backdrop-blur-xl border border-white/15 rounded-xl p-0.5 shadow-xl">
+                  {/* Floating Quick Action Menu (Visible on Hover on Desktop or when Highlighted) */}
+                  <div
+                    className={`absolute top-1 right-1 z-20 flex items-center gap-0.5 transition-opacity duration-150 bg-slate-950/90 backdrop-blur-xl border border-white/15 rounded-xl p-0.5 shadow-xl ${
+                      isHighlighted
+                        ? 'opacity-100'
+                        : 'opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 pointer-events-none sm:pointer-events-auto'
+                    }`}
+                  >
                     <button
                       type="button"
                       onClick={(e) => {
@@ -257,8 +268,8 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
                         onOpenLivePreview(occupant);
                       }}
                       aria-label={`Visualizar ${occupant.name} na tela`}
-                      title="Visualizar na Tela (Live Preview)"
-                      className="p-1 rounded-lg text-slate-300 hover:text-white hover:bg-indigo-500/30 transition-colors cursor-pointer"
+                      title="Abrir pelo App (Live Preview)"
+                      className="hidden sm:inline-flex p-1 rounded-lg text-slate-300 hover:text-white hover:bg-indigo-500/30 transition-colors cursor-pointer"
                     >
                       <Eye className="w-3 h-3" />
                     </button>
@@ -269,8 +280,8 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
                       aria-label={`Abrir ${occupant.name} em nova aba`}
-                      title="Abrir em Nova Aba"
-                      className="p-1 rounded-lg text-slate-300 hover:text-white hover:bg-cyan-500/30 transition-colors cursor-pointer"
+                      title="Abrir no Navegador"
+                      className="hidden sm:inline-flex p-1 rounded-lg text-slate-300 hover:text-white hover:bg-cyan-500/30 transition-colors cursor-pointer"
                     >
                       <ExternalLink className="w-3 h-3" />
                     </a>
@@ -283,7 +294,7 @@ export const DesktopGrid: React.FC<DesktopGridProps> = ({
                       }}
                       aria-label={`Editar ${occupant.name}`}
                       title="Editar ou Excluir App"
-                      className="p-1 rounded-lg text-slate-300 hover:text-white hover:bg-white/15 transition-colors cursor-pointer"
+                      className="p-1 rounded-lg text-slate-200 hover:text-white hover:bg-white/15 transition-colors cursor-pointer"
                     >
                       <Edit2 className="w-3 h-3" />
                     </button>

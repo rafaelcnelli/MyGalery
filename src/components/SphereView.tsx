@@ -20,6 +20,7 @@ interface SphereViewProps {
   apps: WebAppItem[];
   matchingAppIds: Set<string>;
   hasActiveFilter: boolean;
+  highlightedAppId?: string | null;
   onPrimaryAppClick: (app: WebAppItem) => void;
   onOpenLivePreview: (app: WebAppItem) => void;
   onOpenEditModal: (app: WebAppItem) => void;
@@ -35,6 +36,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
   apps,
   matchingAppIds,
   hasActiveFilter,
+  highlightedAppId,
   onPrimaryAppClick,
   onOpenLivePreview,
   onOpenEditModal,
@@ -61,7 +63,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Measure container viewport dynamically so sphere never overflows
+  // Measure container viewport dynamically so sphere never overflows; lock zoom=1 on mobile
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -69,6 +71,9 @@ export const SphereView: React.FC<SphereViewProps> = ({
       const rect = el.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
         setViewportSize({ width: rect.width, height: rect.height });
+        if (rect.width < 640) {
+          setZoom(1);
+        }
       }
     };
     updateSize();
@@ -77,10 +82,9 @@ export const SphereView: React.FC<SphereViewProps> = ({
     return () => observer.disconnect();
   }, []);
 
-  // Build the spherical honeycomb nodes:
-  // Index 0 = Center WatchOS Live Clock (just like the reference image)
-  // Ring 1 & Ring 2 = User's registered apps first (so all apps are immediately prominent around the center),
-  // followed by interactive quick-add slot bubbles to form a complete 19-bubble or 37-bubble watchOS sphere.
+  const isMobileViewport = viewportSize.width < 640;
+
+  // Build the spherical honeycomb nodes
   const sphereNodes = useMemo<SphereNode[]>(() => {
     const sortedApps = [...apps].sort((a, b) => a.slotIndex - b.slotIndex);
     const occupiedSlots = new Set(sortedApps.map((a) => a.slotIndex));
@@ -91,7 +95,6 @@ export const SphereView: React.FC<SphereViewProps> = ({
     }
 
     if (showAllSlotsInSphere) {
-      // Fill up to 19 nodes (Center + Ring 1 (6) + Ring 2 (12)) or 37 nodes if more apps exist
       const targetCount = sortedApps.length > 18 ? 37 : 19;
       for (
         let slotIdx = 0;
@@ -141,14 +144,15 @@ export const SphereView: React.FC<SphereViewProps> = ({
     if (Math.hypot(dx, dy) > 5) {
       didMoveRef.current = true;
     }
+    const effectiveZoom = isMobileViewport ? 1 : zoom;
     const maxPan = bubbleSpacing * 2.6;
     const nextX = Math.max(
       -maxPan,
-      Math.min(maxPan, dragStartRef.current.panX + dx / zoom)
+      Math.min(maxPan, dragStartRef.current.panX + dx / effectiveZoom)
     );
     const nextY = Math.max(
       -maxPan,
-      Math.min(maxPan, dragStartRef.current.panY + dy / zoom)
+      Math.min(maxPan, dragStartRef.current.panY + dy / effectiveZoom)
     );
     setPan({ x: nextX, y: nextY });
   };
@@ -158,6 +162,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (isMobileViewport) return;
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.08 : -0.08;
     setZoom((prev) =>
@@ -169,8 +174,9 @@ export const SphereView: React.FC<SphereViewProps> = ({
     setPan({ x: -worldX, y: -worldY });
   };
 
+  const activeFocusId = highlightedAppId || focusedAppId;
   const focusedApp =
-    apps.find((a) => a.id === focusedAppId) || apps[0] || null;
+    apps.find((a) => a.id === activeFocusId) || apps[0] || null;
 
   // Calculate clock hands angles
   const seconds = now.getSeconds();
@@ -213,7 +219,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
             pan.x,
             pan.y,
             sphereRadius,
-            zoom
+            isMobileViewport ? 1 : zoom
           );
 
           const bubbleBaseSize = Math.max(54, Math.min(78, minDim * 0.115));
@@ -257,7 +263,6 @@ export const SphereView: React.FC<SphereViewProps> = ({
                       />
                     )
                   )}
-                  {/* Hour Hand */}
                   <span
                     style={{
                       transform: `rotate(${hours * 30}deg)`,
@@ -266,7 +271,6 @@ export const SphereView: React.FC<SphereViewProps> = ({
                     }}
                     className="absolute w-1 bg-slate-900 rounded-full origin-bottom"
                   />
-                  {/* Minute Hand */}
                   <span
                     style={{
                       transform: `rotate(${minutes * 6}deg)`,
@@ -275,7 +279,6 @@ export const SphereView: React.FC<SphereViewProps> = ({
                     }}
                     className="absolute w-0.5 bg-slate-900 rounded-full origin-bottom"
                   />
-                  {/* Orange WatchOS Second Hand */}
                   <span
                     style={{
                       transform: `rotate(${seconds * 6}deg)`,
@@ -295,6 +298,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
             const isMatched = matchingAppIds.has(app.id);
             const isDimmed = hasActiveFilter && !isMatched;
             const isFocused = focusedApp?.id === app.id;
+            const isHighlighted = highlightedAppId === app.id;
             const accent =
               ACCENT_COLOR_MAP[app.accentColor] || ACCENT_COLOR_MAP.indigo;
 
@@ -302,9 +306,15 @@ export const SphereView: React.FC<SphereViewProps> = ({
               <div
                 key={node.id}
                 style={{
-                  transform: `translate3d(${proj.screenX}px, ${proj.screenY}px, 0) scale(${proj.scale})`,
+                  transform: `translate3d(${proj.screenX}px, ${proj.screenY}px, 0) scale(${
+                    isHighlighted ? proj.scale * 1.12 : proj.scale
+                  })`,
                   opacity: isDimmed ? proj.opacity * 0.25 : proj.opacity,
-                  zIndex: isFocused ? proj.zIndex + 30 : proj.zIndex,
+                  zIndex: isHighlighted
+                    ? proj.zIndex + 50
+                    : isFocused
+                      ? proj.zIndex + 30
+                      : proj.zIndex,
                 }}
                 className="pointer-events-auto absolute flex flex-col items-center justify-center transition-transform duration-150 ease-out group"
               >
@@ -315,22 +325,19 @@ export const SphereView: React.FC<SphereViewProps> = ({
                   onClick={() => {
                     if (didMoveRef.current) return;
                     setFocusedAppId(app.id);
-                    // If bubble is already near the center of the sphere, launch it; otherwise glide it to center AND select it
-                    if (proj.normalizedDist < 0.38) {
-                      onPrimaryAppClick(app);
-                    } else {
-                      centerOnCoord(coord.x, coord.y);
-                      onPrimaryAppClick(app);
-                    }
+                    centerOnCoord(coord.x, coord.y);
+                    onPrimaryAppClick(app);
                   }}
                   style={{
                     width: `${bubbleBaseSize}px`,
                     height: `${bubbleBaseSize}px`,
                   }}
                   className={`relative rounded-full flex items-center justify-center shadow-[0_14px_34px_rgba(0,0,0,0.65)] transition-all cursor-pointer ${
-                    isFocused
-                      ? 'ring-2 ring-white/80 scale-105'
-                      : 'hover:ring-2 hover:ring-white/50'
+                    isHighlighted
+                      ? 'ring-4 ring-indigo-400 scale-110 shadow-[0_0_32px_rgba(99,102,241,0.55)]'
+                      : isFocused
+                        ? 'ring-2 ring-white/80 scale-105'
+                        : 'hover:ring-2 hover:ring-white/50'
                   }`}
                 >
                   {/* Full Circular WatchOS Orb with AppLogo */}
@@ -404,7 +411,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
               type="button"
               onClick={() => onOpenLivePreview(focusedApp)}
               aria-label={`Preview de ${focusedApp.name}`}
-              title="Visualizar na Tela"
+              title="Abrir pelo App"
               className="p-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/35 text-indigo-200 transition-colors cursor-pointer"
             >
               <Eye className="w-3.5 h-3.5" />
@@ -414,7 +421,7 @@ export const SphereView: React.FC<SphereViewProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               aria-label={`Nova aba ${focusedApp.name}`}
-              title="Abrir em Nova Aba"
+              title="Abrir no Navegador"
               className="p-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-200 transition-colors cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5" />
@@ -431,33 +438,35 @@ export const SphereView: React.FC<SphereViewProps> = ({
           </div>
         )}
 
-        {/* Sphere Zoom & Recenter Controls */}
+        {/* Sphere Recenter & Honeycomb Controls (Zoom hidden on Mobile since app covers full screen) */}
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() =>
-              setZoom((z) => Math.max(0.75, Number((z - 0.12).toFixed(2))))
-            }
-            aria-label="Diminuir zoom da esfera"
-            title="Diminuir Zoom da Esfera"
-            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
-          >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-          <span className="text-[11px] font-mono text-slate-300 tabular-nums px-1">
-            {Math.round(zoom * 100)}%
-          </span>
-          <button
-            type="button"
-            onClick={() =>
-              setZoom((z) => Math.min(1.45, Number((z + 0.12).toFixed(2))))
-            }
-            aria-label="Aumentar zoom da esfera"
-            title="Aumentar Zoom da Esfera"
-            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
+          <div className="hidden sm:flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                setZoom((z) => Math.max(0.75, Number((z - 0.12).toFixed(2))))
+              }
+              aria-label="Diminuir zoom da esfera"
+              title="Diminuir Zoom da Esfera"
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <span className="text-[11px] font-mono text-slate-300 tabular-nums px-1">
+              {Math.round(zoom * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={() =>
+                setZoom((z) => Math.min(1.45, Number((z + 0.12).toFixed(2))))
+              }
+              aria-label="Aumentar zoom da esfera"
+              title="Aumentar Zoom da Esfera"
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           <button
             type="button"
