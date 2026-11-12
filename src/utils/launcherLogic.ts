@@ -39,10 +39,63 @@ export function extractHostname(rawUrl: string): string {
   }
 }
 
+export type FaviconSourceType =
+  | 'custom'
+  | 'direct'
+  | 'google'
+  | 'duckduckgo'
+  | 'monogram';
+
+export interface FaviconCandidate {
+  url: string;
+  source: Exclude<FaviconSourceType, 'monogram'>;
+}
+
+/**
+ * Extracts the base directory URL of an app (e.g. "https://rafaelnel.github.io/Infiltrados_na_fe")
+ * so subpath apps on GitHub Pages or custom folders resolve their direct icons properly.
+ */
+export function extractAppBaseDir(rawUrl: string): {
+  origin: string;
+  baseDir: string;
+  hasSubpath: boolean;
+} {
+  const normalized = normalizeAppUrl(rawUrl);
+  if (!normalized) {
+    return { origin: '', baseDir: '', hasSubpath: false };
+  }
+  try {
+    const parsed = new URL(normalized);
+    const origin = parsed.origin;
+    // Strip trailing index.html / .htm filename if present
+    const cleanPath = parsed.pathname
+      .replace(/\/[^/]+\.(html?|php|aspx?)$/i, '')
+      .replace(/\/+$/, '');
+    const hasSubpath = cleanPath.length > 0 && cleanPath !== '/';
+    const baseDir = hasSubpath ? `${origin}${cleanPath}` : origin;
+    return { origin, baseDir, hasSubpath };
+  } catch {
+    return { origin: '', baseDir: '', hasSubpath: false };
+  }
+}
+
+const APP_HOSTING_SUFFIXES = [
+  '.github.io',
+  '.run.app',
+  '.vercel.app',
+  '.netlify.app',
+  '.pages.dev',
+  '.web.app',
+  '.firebaseapp.com',
+  '.onrender.com',
+  '.surge.sh',
+];
+
 /**
  * Builds the multi-source logo cascade URLs from a raw URL and optional custom override.
- * Source 1 (Primary): Google S2 Favicons 128px
- * Source 2 (Fallback): DuckDuckGo Icons .ico
+ * Prioritizes direct app icons (apple-touch-icon.png, favicon.svg, favicon-192x192.png, favicon.ico)
+ * for subpath apps (such as GitHub Pages repositories) and hosting subdomains, alongside
+ * Google S2 Favicons 128px and DuckDuckGo Icons .ico.
  */
 export function getFaviconSources(
   rawUrl: string,
@@ -52,8 +105,11 @@ export function getFaviconSources(
   primary: string | null;
   secondary: string | null;
   hostname: string;
+  candidates: FaviconCandidate[];
 } {
-  const cleanCustom = customLogoUrl?.trim() ? normalizeAppUrl(customLogoUrl.trim()) : null;
+  const cleanCustom = customLogoUrl?.trim()
+    ? normalizeAppUrl(customLogoUrl.trim())
+    : null;
   const hostname = extractHostname(rawUrl);
 
   if (!hostname) {
@@ -62,14 +118,63 @@ export function getFaviconSources(
       primary: null,
       secondary: null,
       hostname: '',
+      candidates: cleanCustom ? [{ url: cleanCustom, source: 'custom' }] : [],
     };
+  }
+
+  const primary = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`;
+  const secondary = `https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`;
+  const { origin, baseDir, hasSubpath } = extractAppBaseDir(rawUrl);
+
+  const isHostedAppDomain = APP_HOSTING_SUFFIXES.some((suffix) =>
+    hostname.endsWith(suffix)
+  );
+
+  const directCandidates: FaviconCandidate[] = [];
+  if (baseDir) {
+    directCandidates.push(
+      { url: `${baseDir}/apple-touch-icon.png`, source: 'direct' },
+      { url: `${baseDir}/favicon.svg`, source: 'direct' },
+      { url: `${baseDir}/favicon-192x192.png`, source: 'direct' },
+      { url: `${baseDir}/pwa-192x192.png`, source: 'direct' },
+      { url: `${baseDir}/favicon.ico`, source: 'direct' }
+    );
+    if (hasSubpath && origin && origin !== baseDir) {
+      directCandidates.push(
+        { url: `${origin}/apple-touch-icon.png`, source: 'direct' },
+        { url: `${origin}/favicon.svg`, source: 'direct' },
+        { url: `${origin}/favicon.ico`, source: 'direct' }
+      );
+    }
+  }
+
+  const candidates: FaviconCandidate[] = [];
+  if (cleanCustom) {
+    candidates.push({ url: cleanCustom, source: 'custom' });
+  }
+
+  if (hasSubpath || isHostedAppDomain) {
+    // Subpath & hosted apps (e.g. user.github.io/repo-name/) aren't indexed per-folder by Google S2,
+    // so check the app's own direct icons first!
+    candidates.push(
+      ...directCandidates,
+      { url: primary, source: 'google' },
+      { url: secondary, source: 'duckduckgo' }
+    );
+  } else {
+    candidates.push(
+      { url: primary, source: 'google' },
+      { url: secondary, source: 'duckduckgo' },
+      ...directCandidates
+    );
   }
 
   return {
     custom: cleanCustom,
-    primary: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`,
-    secondary: `https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`,
+    primary,
+    secondary,
     hostname,
+    candidates,
   };
 }
 

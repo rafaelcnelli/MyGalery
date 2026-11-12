@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { ACCENT_COLOR_MAP, AccentColor } from '../types/launcher';
-import { getAppInitials, getFaviconSources } from '../utils/launcherLogic';
+import {
+  FaviconSourceType,
+  getAppInitials,
+  getFaviconSources,
+} from '../utils/launcherLogic';
 
 interface AppLogoProps {
   name: string;
@@ -10,7 +14,7 @@ interface AppLogoProps {
   size?: 'xs' | 'sm' | 'md' | 'lg';
   shape?: 'squircle' | 'circle';
   forceMonogram?: boolean;
-  onSourceResolved?: (source: 'custom' | 'google' | 'duckduckgo' | 'monogram') => void;
+  onSourceResolved?: (source: FaviconSourceType) => void;
 }
 
 export const AppLogo: React.FC<AppLogoProps> = ({
@@ -27,58 +31,60 @@ export const AppLogo: React.FC<AppLogoProps> = ({
   const initials = getAppInitials(name);
   const colorStyle = ACCENT_COLOR_MAP[accentColor] || ACCENT_COLOR_MAP.indigo;
 
-  // Stage index: 0 = custom, 1 = google primary, 2 = duckduckgo secondary, 3 = monogram fallback
-  const getInitialStage = (): 0 | 1 | 2 | 3 => {
-    if (forceMonogram || customLogoUrl === 'monogram://fallback') return 3;
-    if (sources.custom) return 0;
-    if (sources.primary) return 1;
-    return 3;
-  };
+  const isMonogramForced =
+    forceMonogram ||
+    customLogoUrl === 'monogram://fallback' ||
+    sources.candidates.length === 0;
 
-  const [stage, setStage] = useState<0 | 1 | 2 | 3>(getInitialStage);
+  const [candidateIndex, setCandidateIndex] = useState<number>(0);
+  const [exhausted, setExhausted] = useState<boolean>(isMonogramForced);
 
   useEffect(() => {
-    const nextStage = getInitialStage();
-    setStage(nextStage);
-  }, [url, customLogoUrl, forceMonogram]);
+    setCandidateIndex(0);
+    setExhausted(
+      forceMonogram ||
+        customLogoUrl === 'monogram://fallback' ||
+        sources.candidates.length === 0
+    );
+  }, [url, customLogoUrl, forceMonogram, sources.candidates.length]);
+
+  const activeCandidate =
+    !exhausted && candidateIndex < sources.candidates.length
+      ? sources.candidates[candidateIndex]
+      : null;
 
   useEffect(() => {
     if (!onSourceResolved) return;
-    const map: Record<0 | 1 | 2 | 3, 'custom' | 'google' | 'duckduckgo' | 'monogram'> = {
-      0: 'custom',
-      1: 'google',
-      2: 'duckduckgo',
-      3: 'monogram',
-    };
-    onSourceResolved(map[stage]);
-  }, [stage, onSourceResolved]);
-
-  const handleImageError = () => {
-    if (stage === 0) {
-      if (sources.primary) {
-        setStage(1);
-      } else {
-        setStage(3);
-      }
-    } else if (stage === 1) {
-      if (sources.secondary) {
-        setStage(2);
-      } else {
-        setStage(3);
-      }
+    if (!activeCandidate) {
+      onSourceResolved('monogram');
     } else {
-      setStage(3);
+      onSourceResolved(activeCandidate.source);
     }
+  }, [activeCandidate, onSourceResolved]);
+
+  const advanceToNextCandidate = () => {
+    setCandidateIndex((prev) => {
+      const next = prev + 1;
+      if (next >= sources.candidates.length) {
+        setExhausted(true);
+        return prev;
+      }
+      return next;
+    });
   };
 
-  const currentImgSrc =
-    stage === 0
-      ? sources.custom
-      : stage === 1
-        ? sources.primary
-        : stage === 2
-          ? sources.secondary
-          : null;
+  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    // When Google S2 doesn't know a domain yet, it returns a generic 16x16 globe icon even when sz=128 is requested
+    if (
+      activeCandidate?.source === 'google' &&
+      img.naturalWidth > 0 &&
+      img.naturalWidth <= 16 &&
+      img.naturalHeight <= 16
+    ) {
+      advanceToNextCandidate();
+    }
+  };
 
   const radiusClass =
     shape === 'circle'
@@ -117,21 +123,21 @@ export const AppLogo: React.FC<AppLogoProps> = ({
       />
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/35 to-transparent pointer-events-none" />
 
-      {currentImgSrc && stage !== 3 ? (
+      {activeCandidate ? (
         <img
-          src={currentImgSrc}
-          alt={`${name || 'App'} logo`}
-          referrerPolicy="no-referrer"
-          onError={handleImageError}
-          className={`relative z-10 ${imgDimensions} object-contain ${
-            shape === 'circle' ? 'rounded-full' : 'rounded-lg'
-          } drop-shadow-sm transition-transform duration-200 group-hover:scale-105`}
+          key={activeCandidate.url}
+          src={activeCandidate.url}
+          alt={`${name} icon`}
+          onLoad={handleImageLoad}
+          onError={advanceToNextCandidate}
+          className={`relative z-10 ${imgDimensions} object-contain rounded-lg drop-shadow-md transition-transform duration-200 group-hover:scale-105`}
+          loading="lazy"
         />
       ) : (
         <div
-          className={`relative z-10 w-full h-full flex items-center justify-center bg-gradient-to-br ${colorStyle.bgGradient} text-white font-display font-bold tracking-tight`}
+          className={`relative z-10 w-full h-full flex items-center justify-center bg-gradient-to-br ${colorStyle.bgGradient} font-display font-bold tracking-tight text-white`}
         >
-          {initials}
+          <span className="drop-shadow-sm">{initials}</span>
         </div>
       )}
     </div>

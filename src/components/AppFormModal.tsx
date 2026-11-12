@@ -54,7 +54,7 @@ export const AppFormModal: React.FC<AppFormModalProps> = ({
   const [slotIndex, setSlotIndex] = useState(0);
   const [preferMonogram, setPreferMonogram] = useState(false);
   const [activeLogoSource, setActiveLogoSource] = useState<
-    'custom' | 'google' | 'duckduckgo' | 'monogram'
+    'custom' | 'direct' | 'google' | 'duckduckgo' | 'monogram'
   >('monogram');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -136,6 +136,7 @@ export const AppFormModal: React.FC<AppFormModalProps> = ({
 
   const sourceLabelMap = {
     custom: 'Logo Customizada (Override)',
+    direct: 'Favicon Oficial do App (SVG / Touch Icon HD)',
     google: 'Google S2 Favicon HD (128px)',
     duckduckgo: 'DuckDuckGo Icons Fallback',
     monogram: 'Monograma Estilizado com Iniciais',

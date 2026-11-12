@@ -39,6 +39,19 @@ test('getFaviconSources returns primary Google S2 128px and secondary DuckDuckGo
   );
   assert.equal(sources.secondary, 'https://icons.duckduckgo.com/ip3/linear.app.ico');
   assert.equal(sources.custom, null);
+
+  // Subpath GitHub Pages app prioritizes direct subpath icons first
+  const ghPagesSources = getFaviconSources(
+    'https://rafaelnel.github.io/Infiltrados_na_fe/'
+  );
+  assert.equal(
+    ghPagesSources.candidates[0]?.url,
+    'https://rafaelnel.github.io/Infiltrados_na_fe/apple-touch-icon.png'
+  );
+  assert.equal(
+    ghPagesSources.candidates[1]?.url,
+    'https://rafaelnel.github.io/Infiltrados_na_fe/favicon.svg'
+  );
 });
 
 test('getAppInitials generates clean 1-2 character uppercase monograms', () => {
