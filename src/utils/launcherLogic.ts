@@ -365,6 +365,7 @@ export function upsertAppWithAutoSwap(
 
 /**
  * Filters apps by search query (matching name, category, or hostname) and optional category filter.
+ * Supports single category ("DevTools"), "ALL", or comma-separated workstation categories ("DevTools,IA").
  */
 export function getMatchingAppIds(
   apps: WebAppItem[],
@@ -373,11 +374,21 @@ export function getMatchingAppIds(
 ): Set<string> {
   const q = searchQuery.trim().toLowerCase();
   const matched = new Set<string>();
+  const normalizedFilter = (categoryFilter || 'ALL').trim();
+  const allowedCategories =
+    normalizedFilter === 'ALL'
+      ? null
+      : new Set(
+          normalizedFilter
+            .split(',')
+            .map((c) => c.trim().toLowerCase())
+            .filter(Boolean)
+        );
 
   for (const app of apps) {
     const matchesCategory =
-      categoryFilter === 'ALL' ||
-      app.category.toLowerCase() === categoryFilter.toLowerCase();
+      !allowedCategories ||
+      allowedCategories.has(app.category.toLowerCase());
 
     if (!matchesCategory) continue;
 

@@ -20,6 +20,7 @@ import {
 } from 'firebase/firestore';
 import {
   ClickBehavior,
+  LauncherViewMode,
   WallpaperTheme,
   WebAppItem,
 } from '../types/launcher';
@@ -226,6 +227,7 @@ export async function ensureOrUpdateWorkspaceDoc(
     hubTitle: string;
     theme: WallpaperTheme;
     clickBehavior: ClickBehavior;
+    viewMode?: LauncherViewMode;
   }
 ): Promise<void> {
   const path = `workspaces/${userId}`;

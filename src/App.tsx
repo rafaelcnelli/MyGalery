@@ -41,6 +41,8 @@ import {
 import { TopBar } from './components/TopBar';
 import { DesktopGrid } from './components/DesktopGrid';
 import { SphereView } from './components/SphereView';
+import { PixelStudioView } from './components/PixelStudioView';
+import { RetroOSView } from './components/RetroOSView';
 import { AppFormModal } from './components/AppFormModal';
 import { LivePreviewModal } from './components/LivePreviewModal';
 import { AppSpotlightModal } from './components/AppSpotlightModal';
@@ -54,6 +56,18 @@ function getDefaultColumnsForViewport(): GridColumnsPerRow {
     return 4;
   }
   return 8;
+}
+
+function parseValidViewMode(val: unknown): LauncherViewMode {
+  if (
+    val === 'sphere' ||
+    val === 'pixel-studio' ||
+    val === 'retro-os' ||
+    val === 'grid'
+  ) {
+    return val;
+  }
+  return 'grid';
 }
 
 function loadInitialState(): LauncherState {
@@ -98,7 +112,7 @@ function loadInitialState(): LauncherState {
           : 'aurora',
       clickBehavior:
         parsed.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
-      viewMode: parsed.viewMode === 'sphere' ? 'sphere' : 'grid',
+      viewMode: parseValidViewMode(parsed.viewMode),
       gridColumns: validCols,
       gridScale:
         parsed.gridScale === 'xs' || parsed.gridScale === 'compact'
@@ -244,6 +258,7 @@ export default function App() {
           hubTitle: stateRef.current.hubTitle,
           theme: stateRef.current.theme,
           clickBehavior: stateRef.current.clickBehavior,
+          viewMode: stateRef.current.viewMode,
         });
       } catch {
         return;
@@ -265,6 +280,9 @@ export default function App() {
                   : prev.theme,
               clickBehavior:
                 data.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
+              viewMode: data.viewMode
+                ? parseValidViewMode(data.viewMode)
+                : prev.viewMode,
               lastSyncedAt: new Date().toISOString(),
             }));
             setSyncStatus('online');
@@ -337,6 +355,7 @@ export default function App() {
             hubTitle: nextState.hubTitle,
             theme: nextState.theme,
             clickBehavior: nextState.clickBehavior,
+            viewMode: nextState.viewMode,
             apps: nextState.apps,
             updatedAt: new Date().toISOString(),
           }),
@@ -382,6 +401,9 @@ export default function App() {
               data.clickBehavior === 'new_tab'
                 ? 'new_tab'
                 : prev.clickBehavior,
+            viewMode: data.viewMode
+              ? parseValidViewMode(data.viewMode)
+              : prev.viewMode,
             apps: cleanApps,
             lastSyncedAt: new Date().toISOString(),
           }));
@@ -414,6 +436,7 @@ export default function App() {
           hubTitle: newTitle,
           theme: next.theme,
           clickBehavior: next.clickBehavior,
+          viewMode: next.viewMode,
         }).catch(() => {});
       }
       return next;
@@ -429,6 +452,7 @@ export default function App() {
           hubTitle: next.hubTitle,
           theme: newTheme,
           clickBehavior: next.clickBehavior,
+          viewMode: next.viewMode,
         }).catch(() => {});
       }
       return next;
@@ -444,8 +468,18 @@ export default function App() {
           hubTitle: next.hubTitle,
           theme: next.theme,
           clickBehavior: newBehavior,
+          viewMode: next.viewMode,
         }).catch(() => {});
       }
+      return next;
+    });
+  };
+
+  const handleChangeViewMode = (newMode: LauncherViewMode) => {
+    setHighlightedAppId(null);
+    setState((prev) => {
+      const next = { ...prev, viewMode: newMode };
+      pushToCloudRest(next);
       return next;
     });
   };
@@ -554,6 +588,7 @@ export default function App() {
         hubTitle: state.hubTitle,
         theme: state.theme,
         clickBehavior: state.clickBehavior,
+        viewMode: state.viewMode,
       });
       await seedAppsToFirestore(currentUser.uid, state.apps);
       setSyncStatus('online');
@@ -588,6 +623,9 @@ export default function App() {
           imported.clickBehavior === 'new_tab'
             ? 'new_tab'
             : prev.clickBehavior,
+        viewMode: imported.viewMode
+          ? parseValidViewMode(imported.viewMode)
+          : prev.viewMode,
         apps: cleanApps,
         lastSyncedAt: new Date().toISOString(),
       };
@@ -628,6 +666,8 @@ export default function App() {
   const highlightedApp = highlightedAppId
     ? state.apps.find((a) => a.id === highlightedAppId) || null
     : null;
+
+  const activeViewMode: LauncherViewMode = parseValidViewMode(state.viewMode);
 
   return (
     <div
@@ -675,10 +715,8 @@ export default function App() {
         onCategoryChange={setSelectedCategory}
         clickBehavior={state.clickBehavior}
         onToggleClickBehavior={handleToggleClickBehavior}
-        viewMode={(state.viewMode || 'grid') as LauncherViewMode}
-        onChangeViewMode={(mode) =>
-          setState((prev) => ({ ...prev, viewMode: mode }))
-        }
+        viewMode={activeViewMode}
+        onChangeViewMode={handleChangeViewMode}
         gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
         onChangeGridColumns={(cols) =>
           setState((prev) => ({
@@ -708,8 +746,8 @@ export default function App() {
         onToggleMinimize={handleToggleMinimizeMenu}
       />
 
-      {/* Main Single-Page Viewport: Either Free Grid or WatchOS 3D Sphere */}
-      {state.viewMode === 'sphere' ? (
+      {/* Main Single-Page Viewport: Grid | Sphere | Pixel Studio | Retro OS */}
+      {activeViewMode === 'sphere' ? (
         <SphereView
           apps={state.apps}
           matchingAppIds={matchingAppIds}
@@ -727,6 +765,68 @@ export default function App() {
             setTargetNewSlot(slotIndex);
             setIsFormModalOpen(true);
           }}
+        />
+      ) : activeViewMode === 'pixel-studio' ? (
+        <PixelStudioView
+          apps={state.apps}
+          matchingAppIds={matchingAppIds}
+          hasActiveFilter={hasActiveFilter}
+          isInteractionPaused={Boolean(
+            highlightedAppId ||
+              isFormModalOpen ||
+              isCloudModalOpen ||
+              previewingApp
+          )}
+          onEnterRetroOSWithFilter={(catFilter) => {
+            setSelectedCategory(catFilter);
+            handleChangeViewMode('retro-os');
+          }}
+          onPrimaryAppClick={handlePrimaryAppClick}
+          onOpenNewAppModal={() => {
+            setEditingApp(null);
+            setTargetNewSlot(null);
+            setIsFormModalOpen(true);
+          }}
+        />
+      ) : activeViewMode === 'retro-os' ? (
+        <RetroOSView
+          apps={state.apps}
+          matchingAppIds={matchingAppIds}
+          hasActiveFilter={hasActiveFilter}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          selectedCategory={selectedCategory}
+          onCategoryChange={setSelectedCategory}
+          isOrganizeMode={isOrganizeMode}
+          onToggleOrganizeMode={() => setIsOrganizeMode((prev) => !prev)}
+          gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
+          onChangeGridColumns={(cols) =>
+            setState((prev) => ({
+              ...prev,
+              gridColumns: cols,
+              gridScale: cols === 4 ? 'compact' : prev.gridScale,
+            }))
+          }
+          gridScale={(state.gridScale || 'normal') as GridScale}
+          syncStatus={syncStatus}
+          onOpenEditModal={(app) => {
+            setEditingApp(app);
+            setTargetNewSlot(app.slotIndex);
+            setIsFormModalOpen(true);
+          }}
+          onOpenNewAppAtSlot={(slotIndex) => {
+            setEditingApp(null);
+            setTargetNewSlot(slotIndex);
+            setIsFormModalOpen(true);
+          }}
+          onOpenNewAppModal={() => {
+            setEditingApp(null);
+            setTargetNewSlot(null);
+            setIsFormModalOpen(true);
+          }}
+          onOpenCloudModal={() => setIsCloudModalOpen(true)}
+          onMoveOrSwapSlot={handleMoveOrSwapSlot}
+          onBackToPixelStudio={() => handleChangeViewMode('pixel-studio')}
         />
       ) : (
         <DesktopGrid
@@ -767,7 +867,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Highlighted App Spotlight Modal (Edit Icon + Open in App / Open in Browser) */}
+      {/* Highlighted App Spotlight Modal (Sonoma Spotlight for Grid, Sphere & Pixel Studio) */}
       <AppSpotlightModal
         app={highlightedApp}
         onClose={() => setHighlightedAppId(null)}

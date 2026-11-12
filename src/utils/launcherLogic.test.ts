@@ -129,7 +129,7 @@ test('deduplicateSlots resolves any colliding slot indices', () => {
   assert.deepEqual(slots, [3, 0, 1]);
 });
 
-test('getMatchingAppIds filters by search query and category', () => {
+test('getMatchingAppIds filters by search query and category (including multi-category workstation filters)', () => {
   const matchedByName = getMatchingAppIds(INITIAL_DEMO_APPS, 'excali', 'ALL');
   assert.equal(matchedByName.size, 1);
   assert.equal(matchedByName.has('demo-app-excalidraw'), true);
@@ -137,6 +137,11 @@ test('getMatchingAppIds filters by search query and category', () => {
   const matchedByCategory = getMatchingAppIds(INITIAL_DEMO_APPS, '', 'DevTools');
   assert.equal(matchedByCategory.size, 1);
   assert.equal(matchedByCategory.has('demo-app-vercel'), true);
+
+  const matchedByMultiStation = getMatchingAppIds(INITIAL_DEMO_APPS, '', 'DevTools,Design');
+  assert.equal(matchedByMultiStation.size, 2);
+  assert.equal(matchedByMultiStation.has('demo-app-vercel'), true);
+  assert.equal(matchedByMultiStation.has('demo-app-excalidraw'), true);
 });
 
 test('generateHexSpiralCoordinates creates watchOS concentric hexagonal rings', () => {

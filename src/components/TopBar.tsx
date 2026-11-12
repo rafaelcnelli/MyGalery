@@ -16,6 +16,8 @@ import {
   SlidersHorizontal,
   ChevronDown,
   ChevronUp,
+  Gamepad2,
+  Monitor,
 } from 'lucide-react';
 import {
   APP_CATEGORIES,
@@ -143,6 +145,19 @@ export const TopBar: React.FC<TopBarProps> = ({
     setIsEditingTitle(false);
   };
 
+  const renderModeIcon = () => {
+    if (viewMode === 'sphere') {
+      return <Orbit className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-cyan-300" />;
+    }
+    if (viewMode === 'pixel-studio') {
+      return <Gamepad2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300" />;
+    }
+    if (viewMode === 'retro-os') {
+      return <Monitor className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-300" />;
+    }
+    return <LayoutGrid className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-300" />;
+  };
+
   const renderSyncBadge = () => {
     if (syncStatus === 'syncing') {
       return (
@@ -168,6 +183,8 @@ export const TopBar: React.FC<TopBarProps> = ({
     );
   };
 
+  const supportsGridSizing = viewMode === 'grid' || viewMode === 'retro-os';
+
   if (isMinimized) {
     return (
       <header className="relative z-30 w-full px-2 sm:px-4 pt-1.5 pb-0.5 shrink-0 flex justify-center">
@@ -176,24 +193,17 @@ export const TopBar: React.FC<TopBarProps> = ({
           <div className="flex items-center gap-1.5 min-w-0">
             <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 p-px shadow-sm shrink-0">
               <div className="w-full h-full bg-slate-950/90 rounded-[7px] flex items-center justify-center">
-                {viewMode === 'sphere' ? (
-                  <Orbit className="w-3 h-3 text-cyan-300" />
-                ) : (
-                  <LayoutGrid className="w-3 h-3 text-indigo-300" />
-                )}
+                {renderModeIcon()}
               </div>
             </div>
-            <span className="font-display font-semibold text-xs text-white tracking-tight truncate max-w-[100px] sm:max-w-[170px]">
+            <span className="font-display font-semibold text-xs text-white tracking-tight truncate max-w-[90px] sm:max-w-[160px]">
               {hubTitle}
-            </span>
-            <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-mono text-slate-400 bg-white/5 border border-white/10">
-              {totalAppsCount} apps
             </span>
           </div>
 
           <div className="w-px h-4 bg-white/15 shrink-0" />
 
-          {/* Segmented View Switcher: Grid | Esfera */}
+          {/* Segmented View Switcher: Grid | Esfera | Estúdio Pixel | Retro OS */}
           <div
             role="group"
             aria-label="Modo de visualização"
@@ -211,8 +221,9 @@ export const TopBar: React.FC<TopBarProps> = ({
               }`}
             >
               <LayoutGrid className="w-2.5 h-2.5" />
-              <span className="hidden xs:inline">Grid</span>
+              <span className="hidden md:inline">Grid</span>
             </button>
+
             <button
               type="button"
               onClick={() => onChangeViewMode('sphere')}
@@ -225,7 +236,37 @@ export const TopBar: React.FC<TopBarProps> = ({
               }`}
             >
               <Orbit className="w-2.5 h-2.5" />
-              <span className="hidden xs:inline">Esfera</span>
+              <span className="hidden md:inline">Esfera</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChangeViewMode('pixel-studio')}
+              aria-pressed={viewMode === 'pixel-studio'}
+              title="Estúdio Indie em Pixel Art"
+              className={`inline-flex items-center gap-1 px-1.5 sm:px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                viewMode === 'pixel-studio'
+                  ? 'bg-amber-500/30 text-amber-100 border border-amber-400/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Gamepad2 className="w-2.5 h-2.5" />
+              <span className="hidden md:inline">Estúdio Pixel</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChangeViewMode('retro-os')}
+              aria-pressed={viewMode === 'retro-os'}
+              title="Computador Antigo (Retro OS / Win95)"
+              className={`inline-flex items-center gap-1 px-1.5 sm:px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                viewMode === 'retro-os'
+                  ? 'bg-emerald-500/30 text-emerald-100 border border-emerald-400/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Monitor className="w-2.5 h-2.5" />
+              <span className="hidden md:inline">Retro OS</span>
             </button>
           </div>
 
@@ -254,7 +295,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-slate-200 hover:text-white text-[11px] font-medium transition-all cursor-pointer shrink-0"
           >
             <ChevronDown className="w-3.5 h-3.5 text-indigo-300" />
-            <span className="text-[11px] font-medium hidden xs:inline">Expandir Menu</span>
+            <span className="text-[11px] font-medium hidden sm:inline">
+              Expandir
+            </span>
           </button>
         </div>
       </header>
@@ -264,16 +307,12 @@ export const TopBar: React.FC<TopBarProps> = ({
   return (
     <header className="relative z-30 w-full px-2 sm:px-5 pt-2 pb-1 shrink-0">
       <div className="w-full max-w-[1600px] mx-auto rounded-2xl bg-slate-900/80 backdrop-blur-xl border border-white/10 shadow-2xl px-2.5 sm:px-3.5 py-2 flex flex-wrap xl:flex-nowrap items-center justify-between gap-2">
-        {/* Left Zone: Brand + Editable Title + View Mode Switcher + Minimize Toggle */}
+        {/* Left Zone: Brand + Editable Title + 4-Mode View Switcher + Minimize Toggle */}
         <div className="flex items-center justify-between w-full xl:w-auto gap-2 min-w-0 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 p-px shadow-lg shadow-indigo-500/20 shrink-0">
               <div className="w-full h-full bg-slate-950/90 rounded-[11px] flex items-center justify-center">
-                {viewMode === 'sphere' ? (
-                  <Orbit className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-cyan-300" />
-                ) : (
-                  <LayoutGrid className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-300" />
-                )}
+                {renderModeIcon()}
               </div>
             </div>
 
@@ -311,7 +350,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                 type="button"
                 onClick={() => setIsEditingTitle(true)}
                 title="Clique para renomear sua galeria"
-                className="group flex items-center gap-1 text-left rounded-lg px-1.5 py-0.5 -ml-1 hover:bg-white/5 transition-colors max-w-[145px] sm:max-w-[200px] cursor-pointer"
+                className="group flex items-center gap-1 text-left rounded-lg px-1.5 py-0.5 -ml-1 hover:bg-white/5 transition-colors max-w-[120px] sm:max-w-[180px] cursor-pointer"
               >
                 <span className="font-display font-semibold text-xs sm:text-sm text-white tracking-tight truncate">
                   {hubTitle}
@@ -322,7 +361,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {/* Segmented View Switcher: Grid | Esfera */}
+            {/* Segmented View Switcher: Grid | Esfera | Estúdio Pixel | Retro OS */}
             <div
               role="group"
               aria-label="Modo de visualização"
@@ -332,27 +371,60 @@ export const TopBar: React.FC<TopBarProps> = ({
                 type="button"
                 onClick={() => onChangeViewMode('grid')}
                 aria-pressed={viewMode === 'grid'}
-                className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                data-testid="mode-btn-grid"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
                   viewMode === 'grid'
                     ? 'bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 shadow-sm'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <LayoutGrid className="w-3 h-3" />
-                <span>Grid</span>
+                <span className="hidden sm:inline">Grid</span>
               </button>
+
               <button
                 type="button"
                 onClick={() => onChangeViewMode('sphere')}
                 aria-pressed={viewMode === 'sphere'}
-                className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                data-testid="mode-btn-sphere"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
                   viewMode === 'sphere'
                     ? 'bg-cyan-500/30 text-cyan-100 border border-cyan-400/40 shadow-sm'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <Orbit className="w-3 h-3" />
-                <span>Esfera</span>
+                <span className="hidden sm:inline">Esfera</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onChangeViewMode('pixel-studio')}
+                aria-pressed={viewMode === 'pixel-studio'}
+                data-testid="mode-btn-pixel-studio"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                  viewMode === 'pixel-studio'
+                    ? 'bg-amber-500/30 text-amber-100 border border-amber-400/40 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Gamepad2 className="w-3 h-3" />
+                <span>Estúdio Pixel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onChangeViewMode('retro-os')}
+                aria-pressed={viewMode === 'retro-os'}
+                data-testid="mode-btn-retro-os"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                  viewMode === 'retro-os'
+                    ? 'bg-emerald-500/30 text-emerald-100 border border-emerald-400/40 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Monitor className="w-3 h-3" />
+                <span>Retro OS</span>
               </button>
             </div>
 
@@ -403,9 +475,14 @@ export const TopBar: React.FC<TopBarProps> = ({
             value={selectedCategory}
             onChange={(e) => onCategoryChange(e.target.value)}
             aria-label="Filtrar por categoria"
-            className="bg-slate-950/75 text-slate-200 text-xs py-1.5 px-2 rounded-xl border border-white/10 focus:border-indigo-400/60 focus:outline-none cursor-pointer shrink-0"
+            className="bg-slate-950/75 text-slate-200 text-xs py-1.5 px-2 rounded-xl border border-white/10 focus:border-indigo-400/60 focus:outline-none cursor-pointer shrink-0 max-w-[130px]"
           >
             <option value="ALL">Todas Tags</option>
+            {selectedCategory.includes(',') && (
+              <option value={selectedCategory}>
+                Estação ({selectedCategory})
+              </option>
+            )}
             {APP_CATEGORIES.map((cat) => (
               <option key={cat} value={cat}>
                 {cat}
@@ -414,16 +491,16 @@ export const TopBar: React.FC<TopBarProps> = ({
           </select>
         </div>
 
-        {/* Right Zone: Grid Size (4/6/8 per row), Click Mode, Theme, Organize, Cloud & + Novo Web App */}
+        {/* Right Zone: Grid Size (2/3/4/6/8 per row), Click Mode, Theme, Organize, Cloud & + Novo Web App */}
         <div className="flex flex-wrap items-center justify-between xl:justify-end gap-1.5 w-full xl:w-auto order-2 xl:order-3 shrink-0">
-          {/* Grid Columns & Size Control (4 / 6 / 8 apps per row) */}
-          {viewMode === 'grid' && (
+          {/* Grid Columns & Size Control (Available in Grid & Retro OS modes) */}
+          {supportsGridSizing && (
             <div className="relative" ref={gridMenuRef}>
               <button
                 type="button"
                 onClick={() => setIsGridMenuOpen((prev) => !prev)}
                 aria-label="Tamanho do Grid e Apps por Linha"
-                title="Ajustar Tamanho do Grid (4, 6 ou 8 apps por linha)"
+                title="Ajustar Tamanho do Grid (2, 3, 4, 6 ou 8 apps por linha)"
                 className="inline-flex items-center gap-1 px-2 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer"
               >
                 <SlidersHorizontal className="w-3 h-3 text-cyan-300" />
@@ -506,7 +583,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           <div
             role="group"
             aria-label="Comportamento do clique principal"
-            className="hidden lg:flex items-center bg-slate-950/80 p-0.5 rounded-xl border border-white/10 text-xs"
+            className="hidden 2xl:flex items-center bg-slate-950/80 p-0.5 rounded-xl border border-white/10 text-xs"
           >
             <button
               type="button"
@@ -592,7 +669,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           </div>
 
           {/* Organize / Edit Grid Mode Toggle */}
-          {viewMode === 'grid' && (
+          {supportsGridSizing && (
             <button
               type="button"
               onClick={onToggleOrganizeMode}

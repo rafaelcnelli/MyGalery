@@ -30,6 +30,12 @@
           "enum": ["preview", "new_tab"],
           "maxLength": 20
         },
+        "viewMode": {
+          "type": "string",
+          "description": "Active launcher visualization mode.",
+          "enum": ["grid", "sphere", "pixel-studio", "retro-os"],
+          "maxLength": 24
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

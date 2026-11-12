@@ -36,7 +36,7 @@ service cloud.firestore {
     // Validation Blueprint: UserWorkspace
     function isValidWorkspace(data, userId) {
       return data.keys().hasAll(['uid', 'hubTitle', 'theme', 'clickBehavior', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'hubTitle', 'theme', 'clickBehavior', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'hubTitle', 'theme', 'clickBehavior', 'viewMode', 'createdAt', 'updatedAt']) &&
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
         data.uid == request.auth.uid && data.uid == userId &&
         data.hubTitle is string && data.hubTitle.size() >= 1 && data.hubTitle.size() <= 80 &&
@@ -44,6 +44,7 @@ service cloud.firestore {
         data.theme in ['aurora', 'midnight', 'cyber', 'ocean'] &&
         data.clickBehavior is string && data.clickBehavior.size() <= 20 &&
         data.clickBehavior in ['preview', 'new_tab'] &&
+        (!('viewMode' in data) || (data.viewMode is string && data.viewMode.size() <= 24 && data.viewMode in ['grid', 'sphere', 'pixel-studio', 'retro-os'])) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -86,8 +87,8 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         (
-          // Action: Update Preferences (title, theme, clickBehavior)
-          incoming().diff(existing()).affectedKeys().hasOnly(['hubTitle', 'theme', 'clickBehavior', 'updatedAt'])
+          // Action: Update Preferences (title, theme, clickBehavior, viewMode)
+          incoming().diff(existing()).affectedKeys().hasOnly(['hubTitle', 'theme', 'clickBehavior', 'viewMode', 'updatedAt'])
         );
 
       allow delete: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && existing().uid == request.auth.uid;

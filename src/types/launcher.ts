@@ -4,7 +4,7 @@ export type WallpaperTheme = 'aurora' | 'midnight' | 'cyber' | 'ocean';
 
 export type ClickBehavior = 'preview' | 'new_tab';
 
-export type LauncherViewMode = 'grid' | 'sphere';
+export type LauncherViewMode = 'grid' | 'sphere' | 'pixel-studio' | 'retro-os';
 
 export type GridColumnsPerRow = 2 | 3 | 4 | 6 | 8;
 
@@ -24,9 +24,11 @@ export type SyncStatus = 'online' | 'local' | 'syncing' | 'error';
 
 export type AppCategory =
   | 'SaaS'
+  | 'Produtividade'
   | 'Utilitário'
   | 'IA'
   | 'Game'
+  | 'Social'
   | 'Cliente'
   | 'Finanças'
   | 'Design'
@@ -59,9 +61,11 @@ export interface LauncherState {
 
 export const APP_CATEGORIES: AppCategory[] = [
   'SaaS',
+  'Produtividade',
   'Utilitário',
   'IA',
   'Game',
+  'Social',
   'Cliente',
   'Finanças',
   'Design',
