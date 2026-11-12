@@ -98,7 +98,7 @@ service cloud.firestore {
           isValidId(userId) &&
           isValidId(appId) &&
           userId == request.auth.uid &&
-          existing().ownerId == request.auth.uid &&
+          (resource == null || existing().ownerId == request.auth.uid) &&
           isWorkspaceMasterOwner(userId);
 
         // Pillar 8: Secure List Queries (No get/exists in allow list)

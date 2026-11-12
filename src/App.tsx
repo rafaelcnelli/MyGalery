@@ -17,6 +17,7 @@ import {
   mapFirestoreDocToApp,
   handleFirestoreError,
   OperationType,
+  isFirebaseConfigured,
 } from './lib/firebase';
 import {
   ClickBehavior,
@@ -185,18 +186,37 @@ export default function App() {
 
   // 3. Track Firebase Auth state
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
+    if (!isFirebaseConfigured) {
       setIsAuthReady(true);
-      if (user) {
-        setSyncStatus('online');
-      } else if (stateRef.current.cloudRestUrl) {
-        setSyncStatus('online');
-      } else {
-        setSyncStatus('local');
-      }
-    });
-    return () => unsubscribe();
+      setSyncStatus('local');
+      return;
+    }
+    try {
+      const unsubscribe = onAuthStateChanged(
+        auth,
+        (user) => {
+          setCurrentUser(user);
+          setIsAuthReady(true);
+          if (user) {
+            setSyncStatus('online');
+          } else if (stateRef.current.cloudRestUrl) {
+            setSyncStatus('online');
+          } else {
+            setSyncStatus('local');
+          }
+        },
+        (error) => {
+          console.warn('Firebase Auth error:', error);
+          setIsAuthReady(true);
+          setSyncStatus('local');
+        }
+      );
+      return () => unsubscribe();
+    } catch (e) {
+      console.warn('Firebase Auth init error:', e);
+      setIsAuthReady(true);
+      setSyncStatus('local');
+    }
   }, []);
 
   // 4. Real-time Firestore synchronization when user is authenticated
@@ -207,79 +227,94 @@ export default function App() {
     const workspacePath = `workspaces/${uid}`;
     const appsPath = `workspaces/${uid}/apps`;
 
-    // Ensure workspace doc exists and subscribe to workspace preferences
-    ensureOrUpdateWorkspaceDoc(uid, {
-      hubTitle: stateRef.current.hubTitle,
-      theme: stateRef.current.theme,
-      clickBehavior: stateRef.current.clickBehavior,
-    }).catch(() => {});
+    let isCancelled = false;
+    let unsubWorkspace: (() => void) | null = null;
+    let unsubApps: (() => void) | null = null;
 
-    const unsubWorkspace = onSnapshot(
-      doc(db, 'workspaces', uid),
-      (snap) => {
-        if (snap.exists()) {
-          const data = snap.data();
-          setState((prev) => ({
-            ...prev,
-            hubTitle: String(data.hubTitle || prev.hubTitle),
-            theme:
-              data.theme && data.theme in WALLPAPER_THEMES
-                ? (data.theme as WallpaperTheme)
-                : prev.theme,
-            clickBehavior:
-              data.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
-            lastSyncedAt: new Date().toISOString(),
-          }));
-          setSyncStatus('online');
-        }
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, workspacePath);
-      }
-    );
-
-    const appsQuery = query(
-      collection(db, 'workspaces', uid, 'apps'),
-      where('ownerId', '==', uid)
-    );
-
-    let hasSeededInitial = false;
-    const unsubApps = onSnapshot(
-      appsQuery,
-      (snapshot) => {
-        if (snapshot.empty && !hasSeededInitial) {
-          hasSeededInitial = true;
-          // Seed existing local apps to user's Firestore workspace on first login
-          seedAppsToFirestore(uid, stateRef.current.apps).catch(() => {});
-          return;
-        }
-        hasSeededInitial = true;
-        const remoteApps: WebAppItem[] = [];
-        snapshot.forEach((docSnap) => {
-          remoteApps.push(
-            mapFirestoreDocToApp(
-              docSnap.id,
-              docSnap.data() as Record<string, unknown>
-            )
-          );
+    const initFirestoreSync = async () => {
+      try {
+        // Ensure parent workspace doc exists FIRST so Master Gate rules succeed
+        await ensureOrUpdateWorkspaceDoc(uid, {
+          hubTitle: stateRef.current.hubTitle,
+          theme: stateRef.current.theme,
+          clickBehavior: stateRef.current.clickBehavior,
         });
-        if (remoteApps.length > 0) {
-          setState((prev) => ({
-            ...prev,
-            apps: deduplicateSlots(remoteApps),
-            lastSyncedAt: new Date().toISOString(),
-          }));
-        }
-        setSyncStatus('online');
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.LIST, appsPath);
+      } catch {
+        return;
       }
-    );
+
+      if (isCancelled) return;
+
+      unsubWorkspace = onSnapshot(
+        doc(db, 'workspaces', uid),
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            setState((prev) => ({
+              ...prev,
+              hubTitle: String(data.hubTitle || prev.hubTitle),
+              theme:
+                data.theme && data.theme in WALLPAPER_THEMES
+                  ? (data.theme as WallpaperTheme)
+                  : prev.theme,
+              clickBehavior:
+                data.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
+              lastSyncedAt: new Date().toISOString(),
+            }));
+            setSyncStatus('online');
+          }
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, workspacePath);
+        }
+      );
+
+      const appsQuery = query(
+        collection(db, 'workspaces', uid, 'apps'),
+        where('ownerId', '==', uid)
+      );
+
+      let hasSeededInitial = false;
+      unsubApps = onSnapshot(
+        appsQuery,
+        (snapshot) => {
+          if (snapshot.empty && !hasSeededInitial) {
+            hasSeededInitial = true;
+            // Seed existing local apps to user's Firestore workspace on first login
+            seedAppsToFirestore(uid, stateRef.current.apps).catch(() => {});
+            return;
+          }
+          hasSeededInitial = true;
+          const remoteApps: WebAppItem[] = [];
+          snapshot.forEach((docSnap) => {
+            remoteApps.push(
+              mapFirestoreDocToApp(
+                docSnap.id,
+                docSnap.data() as Record<string, unknown>
+              )
+            );
+          });
+          if (remoteApps.length > 0) {
+            setState((prev) => ({
+              ...prev,
+              apps: deduplicateSlots(remoteApps),
+              lastSyncedAt: new Date().toISOString(),
+            }));
+          }
+          setSyncStatus('online');
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.LIST, appsPath);
+        }
+      );
+    };
+
+    initFirestoreSync();
 
     return () => {
-      unsubWorkspace();
-      unsubApps();
+      isCancelled = true;
+      if (unsubWorkspace) unsubWorkspace();
+      if (unsubApps) unsubApps();
     };
   }, [isAuthReady, currentUser]);
 
@@ -756,10 +791,23 @@ export default function App() {
         onClose={() => setIsCloudModalOpen(false)}
         currentUser={currentUser}
         onSignInGoogle={async () => {
-          await signInWithGoogle();
+          try {
+            await signInWithGoogle();
+            showToast('Conectado com Google com sucesso!');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!msg.includes('popup-closed-by-user')) {
+              showToast('Não foi possível autenticar com Google no momento.');
+            }
+          }
         }}
         onSignOutGoogle={async () => {
-          await signOutUser();
+          try {
+            await signOutUser();
+            showToast('Sessão desconectada.');
+          } catch {
+            // ignore
+          }
         }}
         cloudRestUrl={state.cloudRestUrl}
         onSaveCloudRestUrl={(url) => {
