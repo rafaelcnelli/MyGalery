@@ -83,12 +83,13 @@ service cloud.firestore {
         isValidId(userId) &&
         userId == request.auth.uid &&
         isValidWorkspace(incoming(), userId) &&
-        incoming().uid == existing().uid &&
-        incoming().createdAt == existing().createdAt &&
+        (!('uid' in existing()) || incoming().uid == existing().uid) &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
         incoming().updatedAt == request.time &&
         (
           // Action: Update Preferences (title, theme, clickBehavior, viewMode)
-          incoming().diff(existing()).affectedKeys().hasOnly(['hubTitle', 'theme', 'clickBehavior', 'viewMode', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['hubTitle', 'theme', 'clickBehavior', 'viewMode', 'updatedAt']) ||
+          !('uid' in existing())
         );
 
       allow delete: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && existing().uid == request.auth.uid;
@@ -99,13 +100,13 @@ service cloud.firestore {
           isValidId(userId) &&
           isValidId(appId) &&
           userId == request.auth.uid &&
-          (resource == null || existing().ownerId == request.auth.uid) &&
+          (resource == null || !('ownerId' in existing()) || existing().ownerId == request.auth.uid || existing().ownerId == 'local') &&
           isWorkspaceMasterOwner(userId);
 
         // Pillar 8: Secure List Queries (No get/exists in allow list)
         allow list: if isSignedIn() &&
           userId == request.auth.uid &&
-          resource.data.ownerId == request.auth.uid;
+          (!('ownerId' in resource.data) || resource.data.ownerId == request.auth.uid || resource.data.ownerId == 'local');
 
         allow create: if isVerifiedUser() &&
           isValidId(userId) &&
@@ -121,15 +122,15 @@ service cloud.firestore {
           isValidId(appId) &&
           userId == request.auth.uid &&
           isValidWebAppItem(incoming(), userId, appId) &&
-          incoming().id == existing().id &&
-          incoming().ownerId == existing().ownerId &&
-          incoming().createdAt == existing().createdAt &&
+          (!('id' in existing()) || incoming().id == existing().id) &&
+          (!('ownerId' in existing()) || existing().ownerId == 'local' || incoming().ownerId == existing().ownerId) &&
+          (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
           incoming().updatedAt == request.time &&
           (
             // Action 1: Reposition / Swap Slot in Grid
             incoming().diff(existing()).affectedKeys().hasOnly(['slotIndex', 'updatedAt']) ||
             // Action 2: Edit App Metadata & Details
-            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'url', 'category', 'accentColor', 'customLogoUrl', 'slotIndex', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'name', 'url', 'category', 'accentColor', 'customLogoUrl', 'slotIndex', 'updatedAt'])
           ) &&
           isWorkspaceMasterOwner(userId);
 
@@ -137,7 +138,7 @@ service cloud.firestore {
           isValidId(userId) &&
           isValidId(appId) &&
           userId == request.auth.uid &&
-          existing().ownerId == request.auth.uid &&
+          (!('ownerId' in existing()) || existing().ownerId == request.auth.uid || existing().ownerId == 'local') &&
           isWorkspaceMasterOwner(userId);
       }
     }

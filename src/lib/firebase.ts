@@ -4,27 +4,38 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut as firebaseSignOut,
+  onAuthStateChanged,
+  type User,
 } from 'firebase/auth';
 import {
   getFirestore,
   doc,
   getDoc,
+  getDocs,
   getDocFromServer,
   setDoc,
   updateDoc,
   deleteDoc,
   collection,
+  query,
+  where,
   writeBatch,
   serverTimestamp,
+  onSnapshot,
   Timestamp,
 } from 'firebase/firestore';
 import {
+  AccentColor,
   ClickBehavior,
+  LauncherState,
   LauncherViewMode,
   WallpaperTheme,
   WebAppItem,
 } from '../types/launcher';
-import { sanitizeWebAppItem } from '../utils/launcherLogic';
+import {
+  deduplicateSlots,
+  sanitizeWebAppItem,
+} from '../utils/launcherLogic';
 
 interface FirebaseAppletConfig {
   apiKey: string;
@@ -36,7 +47,6 @@ interface FirebaseAppletConfig {
   firestoreDatabaseId: string;
 }
 
-// Load local firebase-applet-config.json if present (AI Studio), without failing build when gitignored on GitHub
 const localConfigModules = import.meta.glob<{ default: FirebaseAppletConfig }>(
   '../../firebase-applet-config.json',
   { eager: true }
@@ -44,7 +54,6 @@ const localConfigModules = import.meta.glob<{ default: FirebaseAppletConfig }>(
 const localFileConfig =
   localConfigModules['../../firebase-applet-config.json']?.default;
 
-// Assemble default project key from segments so GitHub Secret Scanning regex never flags the repository
 const DEFAULT_PROVISIONED_KEY = [
   'AIzaSyBgMHt',
   'IZFhG-Q0wk3',
@@ -144,11 +153,11 @@ export function handleFirestoreError(
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
+      userId: auth.currentUser?.uid ?? null,
+      email: auth.currentUser?.email ?? null,
+      emailVerified: auth.currentUser?.emailVerified ?? null,
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+      tenantId: auth.currentUser?.tenantId ?? null,
       providerInfo:
         auth.currentUser?.providerData?.map((provider) => ({
           providerId: provider.providerId,
@@ -160,6 +169,44 @@ export function handleFirestoreError(
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
+}
+
+// Serialized write queue to prevent concurrent getDoc + setDoc race conditions on the same document path
+let writeQueue: Promise<void> = Promise.resolve();
+
+function enqueueFirestoreWrite(task: () => Promise<void>): Promise<void> {
+  const next = writeQueue.then(task, task);
+  writeQueue = next.catch(() => {});
+  return next;
+}
+
+const FIRESTORE_ALLOWED_ACCENTS = new Set([
+  'indigo',
+  'violet',
+  'cyan',
+  'emerald',
+  'amber',
+  'rose',
+  'blue',
+  'fuchsia',
+]);
+
+function toFirestoreSafeAccent(accent: AccentColor): string {
+  if (accent === 'purple') return 'violet';
+  if (accent === 'orange') return 'amber';
+  return FIRESTORE_ALLOWED_ACCENTS.has(accent) ? accent : 'indigo';
+}
+
+function isUserSignedIn(userId: string): boolean {
+  const curr = auth.currentUser;
+  return Boolean(curr && curr.uid === userId);
+}
+
+function isUserActiveAndVerified(userId: string): boolean {
+  const curr = auth.currentUser;
+  if (!curr || curr.uid !== userId) return false;
+  if (curr.emailVerified === false) return false;
+  return true;
 }
 
 /**
@@ -207,7 +254,7 @@ export function mapFirestoreDocToApp(
       ownerId: String(data.ownerId || ''),
       name: String(data.name || 'Untitled'),
       url: String(data.url || 'https://example.com'),
-      category: String(data.category || 'Utilitário'),
+      category: String(data.category || 'Utilitário') as WebAppItem['category'],
       accentColor: (data.accentColor as WebAppItem['accentColor']) || 'indigo',
       customLogoUrl: String(data.customLogoUrl || ''),
       slotIndex: typeof data.slotIndex === 'number' ? data.slotIndex : 0,
@@ -220,6 +267,8 @@ export function mapFirestoreDocToApp(
 
 /**
  * Ensures the user's parent `/workspaces/{userId}` document exists, or updates its settings.
+ * When `onlyCreateIfMissing` is true (used during initial login before reading remote state),
+ * it never overwrites existing remote preferences or runs `updateDoc`.
  */
 export async function ensureOrUpdateWorkspaceDoc(
   userId: string,
@@ -228,78 +277,120 @@ export async function ensureOrUpdateWorkspaceDoc(
     theme: WallpaperTheme;
     clickBehavior: ClickBehavior;
     viewMode?: LauncherViewMode;
-  }
+  },
+  onlyCreateIfMissing: boolean = false
 ): Promise<void> {
-  const path = `workspaces/${userId}`;
-  const workspaceRef = doc(db, 'workspaces', userId);
-  const safeHubTitle = (prefs.hubTitle || 'My Web Creations Hub')
-    .trim()
-    .slice(0, 80);
+  return enqueueFirestoreWrite(async () => {
+    if (!isUserActiveAndVerified(userId)) return;
+    const path = `workspaces/${userId}`;
+    const workspaceRef = doc(db, 'workspaces', userId);
+    const safeHubTitle = (prefs.hubTitle || 'My Web Creations Hub')
+      .trim()
+      .slice(0, 80);
+    const safeTheme: WallpaperTheme =
+      prefs.theme === 'midnight' ||
+      prefs.theme === 'cyber' ||
+      prefs.theme === 'ocean'
+        ? prefs.theme
+        : 'aurora';
+    const safeClick: ClickBehavior =
+      prefs.clickBehavior === 'new_tab' ? 'new_tab' : 'preview';
 
-  try {
-    const existingSnap = await getDoc(workspaceRef);
-    if (!existingSnap.exists()) {
-      await setDoc(workspaceRef, {
-        uid: userId,
-        hubTitle: safeHubTitle,
-        theme: prefs.theme,
-        clickBehavior: prefs.clickBehavior,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(workspaceRef, {
-        hubTitle: safeHubTitle,
-        theme: prefs.theme,
-        clickBehavior: prefs.clickBehavior,
-        updatedAt: serverTimestamp(),
-      });
+    try {
+      const existingSnap = await getDoc(workspaceRef);
+      if (!isUserActiveAndVerified(userId)) return;
+      if (!existingSnap.exists() || existingSnap.data()?.uid !== userId) {
+        await setDoc(workspaceRef, {
+          uid: userId,
+          hubTitle: safeHubTitle,
+          theme: safeTheme,
+          clickBehavior: safeClick,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else if (!onlyCreateIfMissing) {
+        const cur = existingSnap.data();
+        if (
+          cur.hubTitle === safeHubTitle &&
+          cur.theme === safeTheme &&
+          cur.clickBehavior === safeClick
+        ) {
+          return;
+        }
+        await updateDoc(workspaceRef, {
+          hubTitle: safeHubTitle,
+          theme: safeTheme,
+          clickBehavior: safeClick,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      if (!isUserActiveAndVerified(userId) || onlyCreateIfMissing) return;
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  });
 }
 
 /**
  * Creates or updates a single WebAppItem in `/workspaces/{userId}/apps/{appId}`.
+ * Strictly serialized via writeQueue to prevent concurrent setDoc vs updateDoc races.
  */
 export async function saveAppItemToFirestore(
   userId: string,
   appItem: WebAppItem
 ): Promise<void> {
-  const clean = sanitizeWebAppItem(appItem, userId);
-  const path = `workspaces/${userId}/apps/${clean.id}`;
-  const appRef = doc(db, 'workspaces', userId, 'apps', clean.id);
+  return enqueueFirestoreWrite(async () => {
+    if (!isUserActiveAndVerified(userId)) return;
+    const clean = sanitizeWebAppItem(appItem, userId);
+    const safeAccent = toFirestoreSafeAccent(clean.accentColor);
+    const safeCustomLogo = (clean.customLogoUrl || '').slice(0, 500);
+    const path = `workspaces/${userId}/apps/${clean.id}`;
+    const appRef = doc(db, 'workspaces', userId, 'apps', clean.id);
 
-  try {
-    const existing = await getDoc(appRef);
-    if (!existing.exists()) {
-      await setDoc(appRef, {
-        id: clean.id,
-        ownerId: userId,
-        name: clean.name,
-        url: clean.url,
-        category: clean.category,
-        accentColor: clean.accentColor,
-        customLogoUrl: clean.customLogoUrl,
-        slotIndex: clean.slotIndex,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(appRef, {
-        name: clean.name,
-        url: clean.url,
-        category: clean.category,
-        accentColor: clean.accentColor,
-        customLogoUrl: clean.customLogoUrl,
-        slotIndex: clean.slotIndex,
-        updatedAt: serverTimestamp(),
-      });
+    try {
+      const existing = await getDoc(appRef);
+      if (!isUserActiveAndVerified(userId)) return;
+
+      if (!existing.exists()) {
+        await setDoc(appRef, {
+          id: clean.id,
+          ownerId: userId,
+          name: clean.name,
+          url: clean.url,
+          category: clean.category,
+          accentColor: safeAccent,
+          customLogoUrl: safeCustomLogo,
+          slotIndex: clean.slotIndex,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const cur = existing.data();
+        const isUnchanged =
+          cur.name === clean.name &&
+          cur.url === clean.url &&
+          cur.category === clean.category &&
+          cur.accentColor === safeAccent &&
+          cur.customLogoUrl === safeCustomLogo &&
+          cur.slotIndex === clean.slotIndex;
+
+        if (isUnchanged) return;
+
+        await updateDoc(appRef, {
+          name: clean.name,
+          url: clean.url,
+          category: clean.category,
+          accentColor: safeAccent,
+          customLogoUrl: safeCustomLogo,
+          slotIndex: clean.slotIndex,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      if (!isUserActiveAndVerified(userId)) return;
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
+  });
 }
 
 /**
@@ -310,21 +401,25 @@ export async function syncSlotSwapToFirestore(
   changedApps: WebAppItem[]
 ): Promise<void> {
   if (changedApps.length === 0) return;
-  const path = `workspaces/${userId}/apps`;
-  try {
-    const batch = writeBatch(db);
-    for (const item of changedApps) {
-      const clean = sanitizeWebAppItem(item, userId);
-      const appRef = doc(db, 'workspaces', userId, 'apps', clean.id);
-      batch.update(appRef, {
-        slotIndex: clean.slotIndex,
-        updatedAt: serverTimestamp(),
-      });
+  return enqueueFirestoreWrite(async () => {
+    if (!isUserActiveAndVerified(userId)) return;
+    const path = `workspaces/${userId}/apps`;
+    try {
+      const batch = writeBatch(db);
+      for (const item of changedApps) {
+        const clean = sanitizeWebAppItem(item, userId);
+        const appRef = doc(db, 'workspaces', userId, 'apps', clean.id);
+        batch.update(appRef, {
+          slotIndex: clean.slotIndex,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    } catch (error) {
+      if (!isUserActiveAndVerified(userId)) return;
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
-  }
+  });
 }
 
 /**
@@ -334,12 +429,16 @@ export async function deleteAppItemFromFirestore(
   userId: string,
   appId: string
 ): Promise<void> {
-  const path = `workspaces/${userId}/apps/${appId}`;
-  try {
-    await deleteDoc(doc(db, 'workspaces', userId, 'apps', appId));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
+  return enqueueFirestoreWrite(async () => {
+    if (!isUserActiveAndVerified(userId)) return;
+    const path = `workspaces/${userId}/apps/${appId}`;
+    try {
+      await deleteDoc(doc(db, 'workspaces', userId, 'apps', appId));
+    } catch (error) {
+      if (!isUserActiveAndVerified(userId)) return;
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  });
 }
 
 /**
@@ -350,8 +449,167 @@ export async function seedAppsToFirestore(
   apps: WebAppItem[]
 ): Promise<void> {
   for (const item of apps) {
+    if (!isUserActiveAndVerified(userId)) break;
     await saveAppItemToFirestore(userId, item);
   }
+}
+
+export function subscribeToFirebaseAuth(
+  cb: (user: User | null) => void
+): () => void {
+  if (!isFirebaseConfigured) {
+    cb(null);
+    return () => {};
+  }
+  return onAuthStateChanged(auth, cb);
+}
+
+export const loginWithGoogleFirebase = signInWithGoogle;
+export const logoutFirebase = signOutUser;
+
+export async function loadLauncherFromFirestore(
+  user: User
+): Promise<LauncherState | null> {
+  if (!isUserSignedIn(user.uid)) return null;
+  const wsPath = `workspaces/${user.uid}`;
+  const appsPath = `workspaces/${user.uid}/apps`;
+
+  let wsSnap;
+  try {
+    wsSnap = await getDoc(doc(db, 'workspaces', user.uid));
+  } catch (error) {
+    if (!isUserSignedIn(user.uid)) return null;
+    handleFirestoreError(error, OperationType.GET, wsPath);
+  }
+
+  const wsData = wsSnap?.exists() ? wsSnap.data() || {} : {};
+  const loadedAppsMap = new Map<string, WebAppItem>();
+
+  // Also check if an earlier version stored an `apps` array directly on the workspace document
+  if (Array.isArray(wsData.apps)) {
+    for (const rawApp of wsData.apps) {
+      if (rawApp && typeof rawApp === 'object') {
+        const rec = rawApp as Record<string, unknown>;
+        const id = String(rec.id || `ws-app-${loadedAppsMap.size}`);
+        loadedAppsMap.set(id, mapFirestoreDocToApp(id, rec));
+      }
+    }
+  }
+
+  // 1. Primary Pillar-8 compliant query (where ownerId == user.uid)
+  try {
+    const qOwner = query(
+      collection(db, 'workspaces', user.uid, 'apps'),
+      where('ownerId', '==', user.uid)
+    );
+    const ownerSnap = await getDocs(qOwner);
+    ownerSnap.forEach((docSnap) => {
+      loadedAppsMap.set(
+        docSnap.id,
+        mapFirestoreDocToApp(docSnap.id, docSnap.data())
+      );
+    });
+  } catch (error) {
+    if (!isUserSignedIn(user.uid)) return null;
+    handleFirestoreError(error, OperationType.LIST, appsPath);
+  }
+
+  // 2. Soft recovery query for any legacy app documents in the user's subcollection
+  //    that were saved with ownerId === 'local' or without an ownerId filter
+  try {
+    const allSnap = await getDocs(
+      collection(db, 'workspaces', user.uid, 'apps')
+    );
+    allSnap.forEach((docSnap) => {
+      if (!loadedAppsMap.has(docSnap.id)) {
+        loadedAppsMap.set(
+          docSnap.id,
+          mapFirestoreDocToApp(docSnap.id, docSnap.data())
+        );
+      }
+    });
+  } catch {
+    // Ignore if deployed rules strictly enforce the ownerId where-clause
+  }
+
+  if (!wsSnap?.exists() && loadedAppsMap.size === 0) {
+    return null;
+  }
+
+  const loadedApps = deduplicateSlots(Array.from(loadedAppsMap.values()));
+
+  const theme: WallpaperTheme =
+    wsData.theme === 'midnight' ||
+    wsData.theme === 'cyber' ||
+    wsData.theme === 'ocean'
+      ? wsData.theme
+      : 'aurora';
+
+  return {
+    hubTitle: String(wsData.hubTitle || 'My Web Creations Hub'),
+    theme,
+    wallpaperTheme: theme,
+    clickBehavior: wsData.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
+    viewMode: 'grid',
+    gridDensity: 'normal',
+    cloudRestUrl: '',
+    apps: loadedApps,
+    lastSyncedAt: new Date().toISOString(),
+  };
+}
+
+export async function saveLauncherToFirestore(
+  user: User,
+  state: LauncherState
+): Promise<void> {
+  if (!isUserActiveAndVerified(user.uid)) return;
+  await ensureOrUpdateWorkspaceDoc(user.uid, {
+    hubTitle: state.hubTitle,
+    theme: state.wallpaperTheme || state.theme || 'aurora',
+    clickBehavior: state.clickBehavior || 'preview',
+    viewMode: state.viewMode,
+  });
+  await seedAppsToFirestore(user.uid, state.apps);
+}
+
+export function subscribeToFirestoreWorkspace(
+  user: User,
+  onUpdate: (apps: WebAppItem[]) => void,
+  onError?: (msg: string) => void
+): () => void {
+  const appsPath = `workspaces/${user.uid}/apps`;
+  const q = query(
+    collection(db, 'workspaces', user.uid, 'apps'),
+    where('ownerId', '==', user.uid)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const apps: WebAppItem[] = [];
+      snap.forEach((d) => {
+        apps.push(mapFirestoreDocToApp(d.id, d.data()));
+      });
+      if (apps.length > 0) {
+        onUpdate(deduplicateSlots(apps));
+      }
+    },
+    (err) => {
+      if (!isUserSignedIn(user.uid)) return;
+      if (onError) onError(err.message);
+      try {
+        handleFirestoreError(err, OperationType.LIST, appsPath);
+      } catch {
+        // Logged via handleFirestoreError
+      }
+    }
+  );
+}
+
+export async function deleteAppFromFirestore(
+  user: User,
+  appId: string
+): Promise<void> {
+  await deleteAppItemFromFirestore(user.uid, appId);
 }
 
 export { collection, doc };

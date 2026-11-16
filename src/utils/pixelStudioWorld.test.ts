@@ -6,9 +6,11 @@ import {
   PLAYER_SPAWN_POS,
   assignAppsToRoomDesks,
   buildStudioCollisionGrid,
+  createInitialRoamingNPCs,
   findShortestTilePath,
   getRoomAtPosition,
   isPositionWalkable,
+  stepRoamingNPCs,
 } from './pixelStudioWorld';
 import { INITIAL_DEMO_APPS, WebAppItem } from '../types/launcher';
 import { sanitizeWebAppItem } from './launcherLogic';
@@ -40,7 +42,7 @@ test('assignAppsToRoomDesks routes each app to its themed room with a walkable i
   assert.equal(byId.get('app-ia-1')?.roomId, 'devtools-ai');
   assert.equal(byId.get('demo-app-excalidraw')?.roomId, 'design-social');
   assert.equal(byId.get('demo-app-linear')?.roomId, 'finance-prod');
-  assert.equal(byId.get('demo-app-wikipedia')?.roomId, 'finance-prod');
+  assert.equal(byId.get('demo-app-wikipedia')?.roomId, 'devtools-ai');
   assert.equal(byId.get('app-game-1')?.roomId, 'arcade-games');
 
   const grid = buildStudioCollisionGrid(placed);
@@ -60,6 +62,25 @@ test('assignAppsToRoomDesks routes each app to its themed room with a walkable i
       `Expected valid corridor path to app ${item.app.name} in room ${item.roomId}`
     );
   }
+});
+
+test('assignAppsToRoomDesks converts 8th station into Cluster Server Rack when a room has > 8 apps', () => {
+  const tenGames = Array.from({ length: 10 }, (_, idx) =>
+    sanitizeWebAppItem({
+      id: `game-${idx}`,
+      name: `Arcade Game ${idx + 1}`,
+      url: `https://game${idx}.example.com`,
+      category: 'Game',
+      slotIndex: idx,
+    })
+  );
+
+  const placed = assignAppsToRoomDesks(tenGames);
+  assert.equal(placed.length, 8);
+  const eighth = placed[7];
+  assert.equal(eighth.isClusterRack, true);
+  assert.equal(eighth.styleVariant, 'cluster-rack');
+  assert.equal(eighth.clusterApps?.length, 3);
 });
 
 test('all 5 themed rooms and CRT portals are reachable from player spawn via corridors', () => {
@@ -135,4 +156,66 @@ test('getRoomAtPosition accurately reports current room when character enters', 
     getRoomAtPosition(PLAYER_SPAWN_POS.x, PLAYER_SPAWN_POS.y).id,
     'central-lobby'
   );
+});
+
+test('assignAppsToRoomDesks assigns arcade-racing cockpit to racing/sports games and arcade cabinet to other games', () => {
+  const apps: WebAppItem[] = [
+    sanitizeWebAppItem({
+      id: 'game-apex',
+      name: 'Apex Racing',
+      url: 'https://apex-racing.example.com',
+      category: 'Game',
+      slotIndex: 1,
+    }),
+    sanitizeWebAppItem({
+      id: 'game-futebol',
+      name: 'Estrelato Futebol',
+      url: 'https://futebol.example.com',
+      category: 'Game',
+      slotIndex: 2,
+    }),
+    sanitizeWebAppItem({
+      id: 'game-puzzle',
+      name: 'Retro Quest',
+      url: 'https://quest.example.com',
+      category: 'Game',
+      slotIndex: 3,
+    }),
+  ];
+
+  const placed = assignAppsToRoomDesks(apps);
+  const byId = new Map(placed.map((p) => [p.app.id, p]));
+  assert.equal(byId.get('game-apex')?.styleVariant, 'arcade-racing');
+  assert.equal(byId.get('game-futebol')?.styleVariant, 'arcade-racing');
+  assert.equal(byId.get('game-puzzle')?.styleVariant, 'arcade');
+});
+
+test('roaming developer NPCs initialize on walkable tiles and autonomously walk between rooms', () => {
+  const placed = assignAppsToRoomDesks(INITIAL_DEMO_APPS);
+  const grid = buildStudioCollisionGrid(placed);
+  let npcs = createInitialRoamingNPCs(grid);
+
+  assert.equal(npcs.length, 5);
+  for (const npc of npcs) {
+    assert.ok(npc.pathQueue.length > 0, `NPC ${npc.id} should have an initial cross-room path`);
+  }
+
+  const startPositions = npcs.map((n) => ({ x: n.x, y: n.y }));
+
+  // Simulate 3 seconds of movement (60 frames at 50ms)
+  for (let i = 0; i < 60; i++) {
+    npcs = stepRoamingNPCs(npcs, grid, 0.05, () => 0.42);
+  }
+
+  // Every NPC should have moved along its walkable corridor path
+  npcs.forEach((npc, idx) => {
+    const movedDist = Math.hypot(
+      npc.x - startPositions[idx].x,
+      npc.y - startPositions[idx].y
+    );
+    assert.ok(
+      movedDist > 20,
+      `Expected roaming developer NPC ${npc.id} to move across the studio`
+    );
+  });
 });

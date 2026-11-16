@@ -1,941 +1,885 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { onSnapshot, query, where } from 'firebase/firestore';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  auth,
-  db,
-  collection,
-  doc,
-  testFirestoreConnection,
-  signInWithGoogle,
-  signOutUser,
-  ensureOrUpdateWorkspaceDoc,
-  saveAppItemToFirestore,
-  syncSlotSwapToFirestore,
-  deleteAppItemFromFirestore,
-  seedAppsToFirestore,
-  mapFirestoreDocToApp,
-  handleFirestoreError,
-  OperationType,
-  isFirebaseConfigured,
-} from './lib/firebase';
-import {
-  ClickBehavior,
-  GridColumnsPerRow,
-  GridScale,
-  INITIAL_DEMO_APPS,
-  LauncherState,
-  LauncherViewMode,
-  SyncStatus,
-  WALLPAPER_THEMES,
-  WallpaperTheme,
   WebAppItem,
+  ViewMode,
+  WallpaperTheme,
+  GridDensity,
+  AppCategory,
+  LauncherState,
+  INITIAL_DEMO_APPS,
 } from './types/launcher';
 import {
-  deduplicateSlots,
   getMatchingAppIds,
-  moveOrSwapAppSlot,
-  sanitizeWebAppItem,
-  upsertAppWithAutoSwap,
+  saveAppWithAutoSwap,
+  swapSlotPositions,
+  sanitizeLauncherPayload,
+  loadAndRecoverStateFromLocalStorage,
+  mergeAndRecoverApps,
 } from './utils/launcherLogic';
+import {
+  subscribeToFirebaseAuth,
+  loginWithGoogleFirebase,
+  logoutFirebase,
+  loadLauncherFromFirestore,
+  saveLauncherToFirestore,
+  subscribeToFirestoreWorkspace,
+  deleteAppFromFirestore,
+  ensureOrUpdateWorkspaceDoc,
+  saveAppItemToFirestore,
+  seedAppsToFirestore,
+  syncSlotSwapToFirestore,
+  testFirestoreConnection,
+} from './lib/firebase';
+import type { User } from 'firebase/auth';
 import { TopBar } from './components/TopBar';
 import { DesktopGrid } from './components/DesktopGrid';
 import { SphereView } from './components/SphereView';
 import { PixelStudioView } from './components/PixelStudioView';
 import { RetroOSView } from './components/RetroOSView';
 import { AppFormModal } from './components/AppFormModal';
-import { LivePreviewModal } from './components/LivePreviewModal';
 import { AppSpotlightModal } from './components/AppSpotlightModal';
+import { LivePreviewModal } from './components/LivePreviewModal';
 import { CloudSyncModal } from './components/CloudSyncModal';
-import { OfflineIndicator } from './components/OfflineIndicator';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
+import { AppContextMenu, ContextMenuState } from './components/AppContextMenu';
+import { Sparkles, ArrowRightLeft } from 'lucide-react';
 
-const LOCAL_STORAGE_KEY = 'sonoma_web_os_launcher_v1';
+const STORAGE_KEY = 'my_web_creations_hub_v2';
+const CLOUD_ENDPOINT_KEY = 'my_web_creations_cloud_endpoint';
 
-function getDefaultColumnsForViewport(): GridColumnsPerRow {
-  if (typeof window !== 'undefined' && window.innerWidth < 768) {
-    return 4;
-  }
-  return 8;
-}
+const MODE_ONBOARDING_HINTS: Record<ViewMode, string> = {
+  grid: '[Clique] Detalhes • [Duplo Clique] Abrir • [Segurar 300ms] Organizar • [⌘K] Buscar',
+  sphere:
+    '[Arrastar] Orbitar • [Espaço / Home] Centralizar • [⌘K] Atração Magnética',
+  'pixel-studio':
+    '[WASD/Clique] Mover • [Shift] Correr • [Espaço] Interagir • [M] Mapa',
+  'retro-os':
+    '[Clique] Propriedades • [Duplo Clique] Navegador CRT • [⚡ Modo Moderno] Transferir',
+};
 
-function parseValidViewMode(val: unknown): LauncherViewMode {
-  if (
-    val === 'sphere' ||
-    val === 'pixel-studio' ||
-    val === 'retro-os' ||
-    val === 'grid'
-  ) {
-    return val;
-  }
-  return 'grid';
-}
+const loadInitialState = (): LauncherState => {
+  return loadAndRecoverStateFromLocalStorage(STORAGE_KEY, INITIAL_DEMO_APPS);
+};
 
-function loadInitialState(): LauncherState {
-  const defaultCols = getDefaultColumnsForViewport();
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) {
-      return {
-        hubTitle: 'My Web Creations Hub',
-        theme: 'aurora',
-        clickBehavior: 'preview',
-        viewMode: 'grid',
-        gridColumns: defaultCols,
-        gridScale: defaultCols === 4 ? 'compact' : 'normal',
-        cloudRestUrl: '',
-        apps: INITIAL_DEMO_APPS,
-        lastSyncedAt: null,
-      };
-    }
-    const parsed = JSON.parse(raw) as Partial<LauncherState>;
-    const apps =
-      Array.isArray(parsed.apps) && parsed.apps.length > 0
-        ? deduplicateSlots(
-            parsed.apps.map((a) => sanitizeWebAppItem(a, a.ownerId || 'local'))
-          )
-        : INITIAL_DEMO_APPS;
-
-    const validCols: GridColumnsPerRow =
-      parsed.gridColumns === 2 ||
-      parsed.gridColumns === 3 ||
-      parsed.gridColumns === 4 ||
-      parsed.gridColumns === 6 ||
-      parsed.gridColumns === 8
-        ? parsed.gridColumns
-        : defaultCols;
-
-    return {
-      hubTitle: parsed.hubTitle || 'My Web Creations Hub',
-      theme:
-        parsed.theme && parsed.theme in WALLPAPER_THEMES
-          ? parsed.theme
-          : 'aurora',
-      clickBehavior:
-        parsed.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
-      viewMode: parseValidViewMode(parsed.viewMode),
-      gridColumns: validCols,
-      gridScale:
-        parsed.gridScale === 'xs' || parsed.gridScale === 'compact'
-          ? parsed.gridScale
-          : 'normal',
-      cloudRestUrl: parsed.cloudRestUrl || '',
-      apps,
-      lastSyncedAt: parsed.lastSyncedAt || null,
-    };
-  } catch {
-    return {
-      hubTitle: 'My Web Creations Hub',
-      theme: 'aurora',
-      clickBehavior: 'preview',
-      viewMode: 'grid',
-      gridColumns: defaultCols,
-      gridScale: defaultCols === 4 ? 'compact' : 'normal',
-      cloudRestUrl: '',
-      apps: INITIAL_DEMO_APPS,
-      lastSyncedAt: null,
-    };
-  }
-}
-
-export default function App() {
+export function App() {
   const [state, setState] = useState<LauncherState>(loadInitialState);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('ALL');
-  const [isOrganizeMode, setIsOrganizeMode] = useState(false);
-
-  // Modals & Spotlight state
-  const [isFormModalOpen, setIsFormModalOpen] = useState(false);
-  const [editingApp, setEditingApp] = useState<WebAppItem | null>(null);
-  const [targetNewSlot, setTargetNewSlot] = useState<number | null>(null);
-  const [highlightedAppId, setHighlightedAppId] = useState<string | null>(null);
-  const [previewingApp, setPreviewingApp] = useState<WebAppItem | null>(null);
-  const [isCloudModalOpen, setIsCloudModalOpen] = useState(false);
-
-  // Menu Minimized State
-  const [isMenuMinimized, setIsMenuMinimized] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('sonoma_menu_minimized') === 'true';
-    } catch {
-      return false;
-    }
-  });
-
-  const handleToggleMinimizeMenu = useCallback(() => {
-    setIsMenuMinimized((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem('sonoma_menu_minimized', String(next));
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }, []);
-
-  // Cloud & Auth state
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>('local');
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const stateRef = useRef(state);
+  const stateRef = useRef<LauncherState>(state);
   stateRef.current = state;
 
-  const showToast = useCallback((msg: string) => {
-    setToastMessage(msg);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<
+    AppCategory | 'Todas'
+  >('Todas');
+  const [retroRoomFilter, setRetroRoomFilter] = useState<string | undefined>(
+    undefined
+  );
+
+  // UI & Modal states
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [isTopBarMinimized, setIsTopBarMinimized] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingApp, setEditingApp] = useState<WebAppItem | null>(null);
+  const [targetSlotForNew, setTargetSlotForNew] = useState<number | null>(null);
+  const [spotlightApp, setSpotlightApp] = useState<WebAppItem | null>(null);
+  const [previewApp, setPreviewApp] = useState<WebAppItem | null>(null);
+  const [isCloudModalOpen, setIsCloudModalOpen] = useState(false);
+
+  // Notifications / Toasts
+  const [swapToast, setSwapToast] = useState<string | null>(null);
+  const [onboardingToast, setOnboardingToast] = useState<string | null>(null);
+  const seenModesRef = useRef<Set<ViewMode>>(new Set());
+
+  // Cloud & Firebase Sync state
+  const [cloudEndpoint, setCloudEndpoint] = useState<string>(
+    () =>
+      localStorage.getItem(CLOUD_ENDPOINT_KEY) || state.cloudRestUrl || ''
+  );
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [firebaseSyncing, setFirebaseSyncing] = useState(false);
+  const [firebaseError, setFirebaseError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+
+  // Validate connection to Firestore on boot
+  useEffect(() => {
+    void testFirestoreConnection();
   }, []);
 
-  useEffect(() => {
-    if (!toastMessage) return;
-    const timer = setTimeout(() => setToastMessage(null), 3200);
-    return () => clearTimeout(timer);
-  }, [toastMessage]);
-
-  // 1. Validate Firestore connection on boot
-  useEffect(() => {
-    testFirestoreConnection();
-  }, []);
-
-  // 2. Save state to localStorage on every change
+  // Persist to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(state));
-    } catch (e) {
-      console.error('Failed to persist state to localStorage:', e);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch {
+      // Ignore quota errors
     }
   }, [state]);
 
-  // 3. Track Firebase Auth state
+  // Load from optional Cloud REST URL on startup if configured
   useEffect(() => {
-    if (!isFirebaseConfigured) {
-      setIsAuthReady(true);
-      setSyncStatus('local');
-      return;
-    }
-    try {
-      const unsubscribe = onAuthStateChanged(
-        auth,
-        (user) => {
-          setCurrentUser(user);
-          setIsAuthReady(true);
-          if (user) {
-            setSyncStatus('online');
-          } else if (stateRef.current.cloudRestUrl) {
-            setSyncStatus('online');
-          } else {
-            setSyncStatus('local');
-          }
-        },
-        (error) => {
-          console.warn('Firebase Auth error:', error);
-          setIsAuthReady(true);
-          setSyncStatus('local');
-        }
-      );
-      return () => unsubscribe();
-    } catch (e) {
-      console.warn('Firebase Auth init error:', e);
-      setIsAuthReady(true);
-      setSyncStatus('local');
-    }
-  }, []);
-
-  // 4. Real-time Firestore synchronization when user is authenticated
-  useEffect(() => {
-    if (!isAuthReady || !currentUser) return;
-
-    const uid = currentUser.uid;
-    const workspacePath = `workspaces/${uid}`;
-    const appsPath = `workspaces/${uid}/apps`;
-
+    if (!cloudEndpoint) return;
     let isCancelled = false;
-    let unsubWorkspace: (() => void) | null = null;
-    let unsubApps: (() => void) | null = null;
-
-    const initFirestoreSync = async () => {
+    void (async () => {
       try {
-        await ensureOrUpdateWorkspaceDoc(uid, {
-          hubTitle: stateRef.current.hubTitle,
-          theme: stateRef.current.theme,
-          clickBehavior: stateRef.current.clickBehavior,
-          viewMode: stateRef.current.viewMode,
-        });
+        const res = await fetch(cloudEndpoint, { method: 'GET' });
+        if (!res.ok || isCancelled) return;
+        const json = await res.json();
+        const remoteSanitized = sanitizeLauncherPayload(json);
+        if (remoteSanitized && remoteSanitized.apps.length > 0 && !isCancelled) {
+          setState((prev) => {
+            const { apps: merged } = mergeAndRecoverApps(
+              prev.apps,
+              remoteSanitized.apps
+            );
+            return {
+              ...prev,
+              hubTitle:
+                prev.hubTitle === 'My Web Creations Hub' &&
+                remoteSanitized.hubTitle
+                  ? remoteSanitized.hubTitle
+                  : prev.hubTitle,
+              apps: merged,
+            };
+          });
+          setLastSyncedAt(Date.now());
+        }
       } catch {
+        // Ignore REST network error
+      }
+    })();
+    return () => {
+      isCancelled = true;
+    };
+  }, [cloudEndpoint]);
+
+  // Contextual Onboarding Toast (first time entering each mode in session, 4 seconds)
+  useEffect(() => {
+    const mode = state.viewMode;
+    if (!seenModesRef.current.has(mode)) {
+      seenModesRef.current.add(mode);
+      setOnboardingToast(MODE_ONBOARDING_HINTS[mode]);
+      const t = window.setTimeout(() => {
+        setOnboardingToast(null);
+      }, 4000);
+      return () => window.clearTimeout(t);
+    }
+  }, [state.viewMode]);
+
+  // Subscribe to Firebase Auth & Real-Time Workspace Sync
+  useEffect(() => {
+    let unsubscribeWorkspace: (() => void) | null = null;
+    let isCancelled = false;
+
+    const unsubscribeAuth = subscribeToFirebaseAuth(async (user) => {
+      setFirebaseUser(user);
+      if (unsubscribeWorkspace) {
+        unsubscribeWorkspace();
+        unsubscribeWorkspace = null;
+      }
+
+      if (!user) {
+        setFirebaseSyncing(false);
         return;
       }
 
-      if (isCancelled) return;
+      setFirebaseSyncing(true);
+      try {
+        // 1. Ensure parent workspace document exists if missing (without overwriting remote settings)
+        await ensureOrUpdateWorkspaceDoc(
+          user.uid,
+          {
+            hubTitle: stateRef.current.hubTitle,
+            theme: stateRef.current.wallpaperTheme || 'aurora',
+            clickBehavior: stateRef.current.clickBehavior || 'preview',
+            viewMode: stateRef.current.viewMode,
+          },
+          true
+        );
 
-      unsubWorkspace = onSnapshot(
-        doc(db, 'workspaces', uid),
-        (snap) => {
-          if (snap.exists()) {
-            const data = snap.data();
-            setState((prev) => ({
-              ...prev,
-              hubTitle: String(data.hubTitle || prev.hubTitle),
-              theme:
-                data.theme && data.theme in WALLPAPER_THEMES
-                  ? (data.theme as WallpaperTheme)
-                  : prev.theme,
-              clickBehavior:
-                data.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
-              viewMode: data.viewMode
-                ? parseValidViewMode(data.viewMode)
-                : prev.viewMode,
-              lastSyncedAt: new Date().toISOString(),
-            }));
-            setSyncStatus('online');
-          }
-        },
-        (error) => {
-          handleFirestoreError(error, OperationType.GET, workspacePath);
-        }
-      );
+        if (isCancelled) return;
 
-      const appsQuery = query(
-        collection(db, 'workspaces', uid, 'apps'),
-        where('ownerId', '==', uid)
-      );
+        // 2. Load existing workspace apps from Firestore
+        const remoteState = await loadLauncherFromFirestore(user);
+        if (isCancelled) return;
 
-      let hasSeededInitial = false;
-      unsubApps = onSnapshot(
-        appsQuery,
-        (snapshot) => {
-          if (snapshot.empty && !hasSeededInitial) {
-            hasSeededInitial = true;
-            seedAppsToFirestore(uid, stateRef.current.apps).catch(() => {});
-            return;
-          }
-          hasSeededInitial = true;
-          const remoteApps: WebAppItem[] = [];
-          snapshot.forEach((docSnap) => {
-            remoteApps.push(
-              mapFirestoreDocToApp(
-                docSnap.id,
-                docSnap.data() as Record<string, unknown>
-              )
+        if (remoteState && remoteState.apps.length > 0) {
+          const currentLocalApps = stateRef.current.apps;
+          const {
+            apps: mergedApps,
+            localOnlyCustomApps,
+            collidingDemoIdsToRemove,
+          } = mergeAndRecoverApps(currentLocalApps, remoteState.apps);
+
+          setState((prev) => {
+            const localExtMap = new Map(
+              prev.apps.map((a) => [a.id, a.openExternalOnly])
             );
-          });
-          if (remoteApps.length > 0) {
-            setState((prev) => ({
+            return {
               ...prev,
-              apps: deduplicateSlots(remoteApps),
-              lastSyncedAt: new Date().toISOString(),
-            }));
-          }
-          setSyncStatus('online');
-        },
-        (error) => {
-          handleFirestoreError(error, OperationType.LIST, appsPath);
-        }
-      );
-    };
+              hubTitle: remoteState.hubTitle || prev.hubTitle,
+              theme: remoteState.theme || prev.theme,
+              wallpaperTheme: remoteState.wallpaperTheme || prev.wallpaperTheme,
+              apps: mergedApps.map((a) => ({
+                ...a,
+                openExternalOnly:
+                  a.openExternalOnly ?? localExtMap.get(a.id) ?? false,
+              })),
+            };
+          });
 
-    initFirestoreSync();
+          // Remove any accidental demo-app-* seeds that collided with the user's custom app slots
+          for (const demoId of collidingDemoIdsToRemove) {
+            if (isCancelled) break;
+            await deleteAppFromFirestore(user, demoId);
+          }
+
+          // Sync any custom apps that existed locally (or in legacy localStorage) up to Firestore
+          if (localOnlyCustomApps.length > 0 && !isCancelled) {
+            await seedAppsToFirestore(user.uid, localOnlyCustomApps);
+          }
+        } else {
+          // Seed initial local apps only when user's remote workspace is empty
+          await saveLauncherToFirestore(user, stateRef.current);
+        }
+
+        if (isCancelled) return;
+        setLastSyncedAt(Date.now());
+        setFirebaseError(null);
+
+        // 3. Subscribe to real-time updates on user's apps subcollection
+        unsubscribeWorkspace = subscribeToFirestoreWorkspace(
+          user,
+          (remoteApps) => {
+            if (isCancelled || remoteApps.length === 0) return;
+            setState((prev) => {
+              const localExtMap = new Map(
+                prev.apps.map((a) => [a.id, a.openExternalOnly])
+              );
+              const { apps: merged } = mergeAndRecoverApps(
+                prev.apps,
+                remoteApps
+              );
+              return {
+                ...prev,
+                apps: merged.map((a) => ({
+                  ...a,
+                  openExternalOnly:
+                    a.openExternalOnly ?? localExtMap.get(a.id) ?? false,
+                })),
+              };
+            });
+            setLastSyncedAt(Date.now());
+          },
+          (errMsg) => setFirebaseError(errMsg)
+        );
+      } catch (err) {
+        if (!isCancelled) {
+          setFirebaseError(
+            err instanceof Error ? err.message : 'Erro ao sincronizar Firebase'
+          );
+        }
+      } finally {
+        if (!isCancelled) {
+          setFirebaseSyncing(false);
+        }
+      }
+    });
 
     return () => {
       isCancelled = true;
-      if (unsubWorkspace) unsubWorkspace();
-      if (unsubApps) unsubApps();
+      unsubscribeAuth();
+      if (unsubscribeWorkspace) unsubscribeWorkspace();
     };
-  }, [isAuthReady, currentUser]);
+  }, []);
 
-  // 5. Custom Cloud Sync REST API: Push (PUT) helper
-  const pushToCloudRest = useCallback(
-    async (nextState: LauncherState, customUrl?: string) => {
-      const endpoint = (customUrl ?? nextState.cloudRestUrl).trim();
-      if (!endpoint) return;
-      try {
-        setSyncStatus('syncing');
-        const res = await fetch(endpoint, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            hubTitle: nextState.hubTitle,
-            theme: nextState.theme,
-            clickBehavior: nextState.clickBehavior,
-            viewMode: nextState.viewMode,
-            apps: nextState.apps,
-            updatedAt: new Date().toISOString(),
-          }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        setSyncStatus('online');
-        setState((prev) => ({
-          ...prev,
-          lastSyncedAt: new Date().toISOString(),
-        }));
-      } catch (err) {
-        console.warn('Cloud REST PUT failed:', err);
-        setSyncStatus(currentUser ? 'online' : 'local');
-      }
-    },
-    [currentUser]
+  const showSwapToast = useCallback((msg: string) => {
+    setSwapToast(msg);
+    window.setTimeout(() => {
+      setSwapToast(null);
+    }, 3200);
+  }, []);
+
+  const matchingAppIds = useMemo(
+    () => getMatchingAppIds(state.apps, searchQuery, selectedCategory),
+    [state.apps, searchQuery, selectedCategory]
   );
 
-  // 6. Custom Cloud Sync REST API: Pull (GET) on initial load or URL change
-  const pullFromCloudRest = useCallback(
-    async (endpointUrl: string) => {
-      const endpoint = endpointUrl.trim();
-      if (!endpoint) return;
-      try {
-        setSyncStatus('syncing');
-        const res = await fetch(endpoint, { method: 'GET' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (data && Array.isArray(data.apps)) {
-          const cleanApps = deduplicateSlots(
-            data.apps.map((a: Partial<WebAppItem>) =>
-              sanitizeWebAppItem(a, currentUser?.uid || 'local')
-            )
-          );
-          setState((prev) => ({
-            ...prev,
-            hubTitle: data.hubTitle || prev.hubTitle,
-            theme:
-              data.theme && data.theme in WALLPAPER_THEMES
-                ? data.theme
-                : prev.theme,
-            clickBehavior:
-              data.clickBehavior === 'new_tab'
-                ? 'new_tab'
-                : prev.clickBehavior,
-            viewMode: data.viewMode
-              ? parseValidViewMode(data.viewMode)
-              : prev.viewMode,
-            apps: cleanApps,
-            lastSyncedAt: new Date().toISOString(),
-          }));
-          setSyncStatus('online');
-          showToast('Galeria sincronizada da nuvem com sucesso!');
-        } else {
-          await pushToCloudRest(stateRef.current, endpoint);
-        }
-      } catch (err) {
-        console.warn('Cloud REST GET failed:', err);
-        setSyncStatus(currentUser ? 'online' : 'local');
-      }
-    },
-    [currentUser, pushToCloudRest, showToast]
-  );
+  const hasActiveFilter =
+    searchQuery.trim() !== '' || selectedCategory !== 'Todas';
 
-  useEffect(() => {
-    if (state.cloudRestUrl) {
-      pullFromCloudRest(state.cloudRestUrl);
-    }
-  }, [state.cloudRestUrl, pullFromCloudRest]);
+  const handleClearFilter = useCallback(() => {
+    setSearchQuery('');
+    setSelectedCategory('Todas');
+  }, []);
 
-  // Handlers for Workspace Preferences
-  const handleUpdateHubTitle = (newTitle: string) => {
-    setState((prev) => {
-      const next = { ...prev, hubTitle: newTitle };
-      pushToCloudRest(next);
-      if (currentUser) {
-        ensureOrUpdateWorkspaceDoc(currentUser.uid, {
-          hubTitle: newTitle,
-          theme: next.theme,
-          clickBehavior: next.clickBehavior,
-          viewMode: next.viewMode,
-        }).catch(() => {});
-      }
-      return next;
-    });
-  };
+  // Universal Launch Handlers
+  const handleOpenExternal = useCallback((app: WebAppItem) => {
+    const a = document.createElement('a');
+    a.href = app.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
 
-  const handleChangeTheme = (newTheme: WallpaperTheme) => {
-    setState((prev) => {
-      const next = { ...prev, theme: newTheme };
-      pushToCloudRest(next);
-      if (currentUser) {
-        ensureOrUpdateWorkspaceDoc(currentUser.uid, {
-          hubTitle: next.hubTitle,
-          theme: newTheme,
-          clickBehavior: next.clickBehavior,
-          viewMode: next.viewMode,
-        }).catch(() => {});
-      }
-      return next;
-    });
-  };
-
-  const handleToggleClickBehavior = (newBehavior: ClickBehavior) => {
-    setState((prev) => {
-      const next = { ...prev, clickBehavior: newBehavior };
-      pushToCloudRest(next);
-      if (currentUser) {
-        ensureOrUpdateWorkspaceDoc(currentUser.uid, {
-          hubTitle: next.hubTitle,
-          theme: next.theme,
-          clickBehavior: newBehavior,
-          viewMode: next.viewMode,
-        }).catch(() => {});
-      }
-      return next;
-    });
-  };
-
-  const handleChangeViewMode = (newMode: LauncherViewMode) => {
-    setHighlightedAppId(null);
-    setState((prev) => {
-      const next = { ...prev, viewMode: newMode };
-      pushToCloudRest(next);
-      return next;
-    });
-  };
-
-  // Handlers for Apps CRUD & Slot Positioning
-  const handleMoveOrSwapSlot = (appId: string, targetSlotIndex: number) => {
-    setState((prev) => {
-      const { updatedApps, swappedWithApp, didChange } = moveOrSwapAppSlot(
-        prev.apps,
-        appId,
-        targetSlotIndex
-      );
-      if (!didChange) return prev;
-
-      const movedApp = updatedApps.find((a) => a.id === appId);
-      if (swappedWithApp && movedApp) {
-        showToast(
-          `Posições trocadas: ${movedApp.name} ⇄ ${swappedWithApp.name}`
-        );
-      }
-
-      const next = { ...prev, apps: updatedApps };
-      pushToCloudRest(next);
-
-      if (currentUser && movedApp) {
-        const changed = swappedWithApp
-          ? [
-              movedApp,
-              updatedApps.find((a) => a.id === swappedWithApp.id)!,
-            ].filter(Boolean)
-          : [movedApp];
-        syncSlotSwapToFirestore(currentUser.uid, changed).catch(() => {});
-      }
-
-      return next;
-    });
-  };
-
-  const handleSaveApp = (incomingApp: WebAppItem) => {
-    setState((prev) => {
-      const { updatedApps, swappedOccupant } = upsertAppWithAutoSwap(
-        prev.apps,
-        incomingApp
-      );
-      if (swappedOccupant) {
-        showToast(
-          `${incomingApp.name} posicionado no Slot #${incomingApp.slotIndex} (trocou com ${swappedOccupant.name})`
-        );
+  const handleOpenInternal = useCallback(
+    (app: WebAppItem) => {
+      if (app.openExternalOnly) {
+        handleOpenExternal(app);
       } else {
-        showToast(
-          `${incomingApp.name} salvo no Slot #${String(
-            incomingApp.slotIndex
-          ).padStart(2, '0')}`
+        setPreviewApp(app);
+      }
+    },
+    [handleOpenExternal]
+  );
+
+  const handlePrimaryAppClick = useCallback(
+    (app: WebAppItem, e?: React.MouseEvent) => {
+      if (e && (e.metaKey || e.ctrlKey)) {
+        handleOpenExternal(app);
+        return;
+      }
+      if (state.directLaunchMode) {
+        handleOpenInternal(app);
+        return;
+      }
+      setSpotlightApp(app);
+    },
+    [handleOpenExternal, handleOpenInternal, state.directLaunchMode]
+  );
+
+  const handleDoubleClickApp = useCallback(
+    (app: WebAppItem) => {
+      setSpotlightApp(null);
+      handleOpenInternal(app);
+    },
+    [handleOpenInternal]
+  );
+
+  const handleContextMenuApp = useCallback(
+    (app: WebAppItem, e: React.MouseEvent) => {
+      e.preventDefault();
+      setContextMenu({
+        app,
+        x: e.clientX,
+        y: e.clientY,
+      });
+    },
+    []
+  );
+
+  const handleToggleExternalOnly = useCallback((targetApp: WebAppItem) => {
+    const nextFlag = !targetApp.openExternalOnly;
+    setState((prev) => ({
+      ...prev,
+      apps: prev.apps.map((a) =>
+        a.id === targetApp.id ? { ...a, openExternalOnly: nextFlag } : a
+      ),
+    }));
+    setSpotlightApp((prev) =>
+      prev && prev.id === targetApp.id
+        ? { ...prev, openExternalOnly: nextFlag }
+        : prev
+    );
+    setPreviewApp((prev) =>
+      prev && prev.id === targetApp.id
+        ? { ...prev, openExternalOnly: nextFlag }
+        : prev
+    );
+  }, []);
+
+  // CRUD & Auto-Swap Handlers with Targeted Firestore Writes
+  const handleSaveApp = useCallback(
+    (data: Omit<WebAppItem, 'id' | 'createdAt'>, existingId?: string) => {
+      const prevApps = stateRef.current.apps;
+      const result = saveAppWithAutoSwap(
+        prevApps,
+        { ...data, ownerId: firebaseUser?.uid || 'local' },
+        existingId
+      );
+      if (result.swappedAppName && result.swappedToSlot !== undefined) {
+        const num = String(result.swappedToSlot + 1).padStart(2, '0');
+        showSwapToast(
+          `Auto-Swap: "${result.swappedAppName}" foi movido para o Slot #${num}`
         );
       }
-
-      const next = { ...prev, apps: updatedApps };
-      pushToCloudRest(next);
-
-      if (currentUser) {
-        saveAppItemToFirestore(currentUser.uid, incomingApp).catch(() => {});
-        if (swappedOccupant) {
-          saveAppItemToFirestore(currentUser.uid, swappedOccupant).catch(
-            () => {}
-          );
-        }
-      }
-
-      return next;
-    });
-  };
-
-  const handleDeleteApp = (appId: string) => {
-    if (highlightedAppId === appId) {
-      setHighlightedAppId(null);
-    }
-    setState((prev) => {
-      const target = prev.apps.find((a) => a.id === appId);
-      const updatedApps = prev.apps.filter((a) => a.id !== appId);
-      if (target) {
-        showToast(`"${target.name}" removido do grid.`);
-      }
-      const next = { ...prev, apps: updatedApps };
-      pushToCloudRest(next);
-
-      if (currentUser) {
-        deleteAppItemFromFirestore(currentUser.uid, appId).catch(() => {});
-      }
-      return next;
-    });
-  };
-
-  // Clicking an app highlights it in Spotlight with Edit Icon + Bottom Action Buttons
-  const handlePrimaryAppClick = (app: WebAppItem) => {
-    setHighlightedAppId(app.id);
-  };
-
-  const handleSyncNow = async () => {
-    if (state.cloudRestUrl) {
-      await pullFromCloudRest(state.cloudRestUrl);
-      await pushToCloudRest(stateRef.current);
-    }
-    if (currentUser) {
-      setSyncStatus('syncing');
-      await ensureOrUpdateWorkspaceDoc(currentUser.uid, {
-        hubTitle: state.hubTitle,
-        theme: state.theme,
-        clickBehavior: state.clickBehavior,
-        viewMode: state.viewMode,
-      });
-      await seedAppsToFirestore(currentUser.uid, state.apps);
-      setSyncStatus('online');
       setState((prev) => ({
         ...prev,
-        lastSyncedAt: new Date().toISOString(),
+        apps: result.apps,
       }));
-      showToast('Sincronização com Cloud Firestore concluída!');
-    } else if (!state.cloudRestUrl) {
-      showToast('Dados salvos localmente no navegador.');
-    }
-  };
 
-  const handleImportBackup = (imported: Partial<LauncherState>) => {
-    setState((prev) => {
-      const cleanApps = Array.isArray(imported.apps)
-        ? deduplicateSlots(
-            imported.apps.map((a) =>
-              sanitizeWebAppItem(a, currentUser?.uid || 'local')
-            )
-          )
-        : prev.apps;
-
-      const next: LauncherState = {
-        ...prev,
-        hubTitle: imported.hubTitle || prev.hubTitle,
-        theme:
-          imported.theme && imported.theme in WALLPAPER_THEMES
-            ? imported.theme
-            : prev.theme,
-        clickBehavior:
-          imported.clickBehavior === 'new_tab'
-            ? 'new_tab'
-            : prev.clickBehavior,
-        viewMode: imported.viewMode
-          ? parseValidViewMode(imported.viewMode)
-          : prev.viewMode,
-        apps: cleanApps,
-        lastSyncedAt: new Date().toISOString(),
-      };
-
-      pushToCloudRest(next);
-      if (currentUser) {
-        seedAppsToFirestore(currentUser.uid, cleanApps).catch(() => {});
+      if (firebaseUser) {
+        void (async () => {
+          try {
+            setFirebaseSyncing(true);
+            await saveAppItemToFirestore(firebaseUser.uid, result.savedApp);
+            if (result.swappedToSlot !== undefined) {
+              const swappedItem = result.apps.find(
+                (a) =>
+                  a.slotIndex === result.swappedToSlot &&
+                  a.id !== result.savedApp.id
+              );
+              if (swappedItem) {
+                await saveAppItemToFirestore(firebaseUser.uid, swappedItem);
+              }
+            }
+            setLastSyncedAt(Date.now());
+          } catch (err) {
+            setFirebaseError(
+              err instanceof Error ? err.message : 'Erro ao salvar no Firestore'
+            );
+          } finally {
+            setFirebaseSyncing(false);
+          }
+        })();
       }
-      return next;
-    });
-  };
-
-  const handleRestoreDemoApps = () => {
-    setState((prev) => {
-      const demo = INITIAL_DEMO_APPS.map((a) =>
-        sanitizeWebAppItem(a, currentUser?.uid || 'local')
-      );
-      const next = { ...prev, apps: demo };
-      pushToCloudRest(next);
-      if (currentUser) {
-        seedAppsToFirestore(currentUser.uid, demo).catch(() => {});
-      }
-      return next;
-    });
-  };
-
-  const matchingAppIds = getMatchingAppIds(
-    state.apps,
-    searchQuery,
-    selectedCategory
+    },
+    [firebaseUser, showSwapToast]
   );
-  const hasActiveFilter =
-    searchQuery.trim().length > 0 || selectedCategory !== 'ALL';
 
-  const currentWallpaper =
-    WALLPAPER_THEMES[state.theme] || WALLPAPER_THEMES.aurora;
+  const handleDeleteApp = useCallback(
+    async (id: string) => {
+      setState((prev) => ({
+        ...prev,
+        apps: prev.apps.filter((a) => a.id !== id),
+      }));
+      if (spotlightApp?.id === id) setSpotlightApp(null);
+      if (previewApp?.id === id) setPreviewApp(null);
+      if (firebaseUser) {
+        try {
+          setFirebaseSyncing(true);
+          await deleteAppFromFirestore(firebaseUser, id);
+          setLastSyncedAt(Date.now());
+        } catch {
+          // Handled via sync
+        } finally {
+          setFirebaseSyncing(false);
+        }
+      }
+    },
+    [firebaseUser, previewApp?.id, spotlightApp?.id]
+  );
 
-  const highlightedApp = highlightedAppId
-    ? state.apps.find((a) => a.id === highlightedAppId) || null
-    : null;
+  const handleSwapSlots = useCallback(
+    (sourceSlot: number, targetSlot: number) => {
+      const prevApps = stateRef.current.apps;
+      const targetOccupant = prevApps.find((a) => a.slotIndex === targetSlot);
+      const nextApps = swapSlotPositions(prevApps, sourceSlot, targetSlot);
+      if (targetOccupant) {
+        const srcNum = String(sourceSlot + 1).padStart(2, '0');
+        showSwapToast(
+          `Posições trocadas: "${targetOccupant.name}" movido para #${srcNum}`
+        );
+      }
+      setState((prev) => ({
+        ...prev,
+        apps: nextApps,
+      }));
 
-  const activeViewMode: LauncherViewMode = parseValidViewMode(state.viewMode);
+      if (firebaseUser) {
+        const changed = nextApps.filter(
+          (a) => a.slotIndex === sourceSlot || a.slotIndex === targetSlot
+        );
+        void syncSlotSwapToFirestore(firebaseUser.uid, changed);
+      }
+    },
+    [firebaseUser, showSwapToast]
+  );
+
+  const handleOpenAddModal = useCallback((slotIndex: number | null = null) => {
+    setEditingApp(null);
+    setTargetSlotForNew(slotIndex);
+    setIsFormOpen(true);
+  }, []);
+
+  const handleOpenEditModal = useCallback((app: WebAppItem) => {
+    setEditingApp(app);
+    setTargetSlotForNew(app.slotIndex);
+    setIsFormOpen(true);
+  }, []);
+
+  // Global Keyboard Shortcuts (Cmd/Ctrl+K, Cmd/Ctrl+M, 1/2/3/4, Esc)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInput =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      // Cmd/Ctrl + K -> Command Palette
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen((prev) => !prev);
+        return;
+      }
+
+      // Cmd/Ctrl + M -> Toggle Dynamic Island Minimized TopBar
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        setIsTopBarMinimized((prev) => !prev);
+        return;
+      }
+
+      // Escape -> Close active overlay or clear filter/edit mode
+      if (e.key === 'Escape') {
+        if (contextMenu) {
+          setContextMenu(null);
+          return;
+        }
+        if (isCommandPaletteOpen) {
+          setIsCommandPaletteOpen(false);
+          return;
+        }
+        if (previewApp) {
+          setPreviewApp(null);
+          return;
+        }
+        if (spotlightApp) {
+          setSpotlightApp(null);
+          return;
+        }
+        if (isFormOpen) {
+          setIsFormOpen(false);
+          return;
+        }
+        if (isCloudModalOpen) {
+          setIsCloudModalOpen(false);
+          return;
+        }
+        if (hasActiveFilter) {
+          handleClearFilter();
+          return;
+        }
+        if (isEditMode) {
+          setIsEditMode(false);
+          return;
+        }
+      }
+
+      // Quick Mode Switching (1, 2, 3, 4) when outside inputs and no modal open
+      if (
+        !isInput &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !isCommandPaletteOpen &&
+        !isFormOpen &&
+        !spotlightApp &&
+        !previewApp &&
+        !isCloudModalOpen
+      ) {
+        if (e.key === '1') {
+          setState((p) => ({ ...p, viewMode: 'grid' }));
+        } else if (e.key === '2') {
+          setState((p) => ({ ...p, viewMode: 'sphere' }));
+        } else if (e.key === '3') {
+          setState((p) => ({ ...p, viewMode: 'pixel-studio' }));
+        } else if (e.key === '4') {
+          setState((p) => ({ ...p, viewMode: 'retro-os' }));
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [
+    contextMenu,
+    handleClearFilter,
+    hasActiveFilter,
+    isCloudModalOpen,
+    isCommandPaletteOpen,
+    isEditMode,
+    isFormOpen,
+    previewApp,
+    spotlightApp,
+  ]);
+
+  // Wallpaper Theme Classes
+  const wallpaperClass =
+    state.wallpaperTheme === 'cyber'
+      ? 'bg-gradient-to-br from-fuchsia-950 via-zinc-950 to-cyan-950'
+      : state.wallpaperTheme === 'ocean'
+        ? 'bg-gradient-to-br from-slate-950 via-cyan-950 to-blue-950'
+        : state.wallpaperTheme === 'midnight'
+          ? 'bg-zinc-950'
+          : 'bg-gradient-to-br from-indigo-950/90 via-zinc-950 to-purple-950/80';
+
+  const isAnyOverlayOpen = Boolean(
+    isCommandPaletteOpen ||
+      isFormOpen ||
+      spotlightApp ||
+      previewApp ||
+      isCloudModalOpen ||
+      contextMenu
+  );
 
   return (
     <div
-      className={`relative h-dvh w-screen overflow-hidden flex flex-col ${currentWallpaper.baseBg} text-slate-100 select-none`}
+      className={`relative w-screen h-[100dvh] overflow-hidden flex flex-col ${wallpaperClass} text-zinc-100 font-sans select-none`}
     >
-      {/* Ambient Radial Diffused Backlights per Wallpaper Theme */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-        {state.theme === 'aurora' && (
-          <>
-            <div className="absolute -top-36 -left-36 w-[560px] h-[560px] rounded-full bg-indigo-600/20 blur-[130px]" />
-            <div className="absolute top-1/4 right-[-10%] w-[500px] h-[500px] rounded-full bg-violet-600/15 blur-[130px]" />
-            <div className="absolute -bottom-32 left-1/3 w-[520px] h-[520px] rounded-full bg-cyan-500/10 blur-[140px]" />
-          </>
+      {/* Layer A: Persistent TopBar + Dynamic Island Mode */}
+      <TopBar
+        hubTitle={state.hubTitle}
+        onUpdateHubTitle={(hubTitle) =>
+          setState((prev) => ({ ...prev, hubTitle }))
+        }
+        viewMode={state.viewMode}
+        onViewModeChange={(viewMode) => {
+          setRetroRoomFilter(undefined);
+          setState((prev) => ({ ...prev, viewMode }));
+        }}
+        wallpaperTheme={state.wallpaperTheme}
+        onWallpaperChange={(wallpaperTheme: WallpaperTheme) =>
+          setState((prev) => ({ ...prev, wallpaperTheme }))
+        }
+        gridDensity={state.gridDensity}
+        onGridDensityChange={(gridDensity: GridDensity) =>
+          setState((prev) => ({ ...prev, gridDensity }))
+        }
+        searchQuery={searchQuery}
+        selectedCategory={selectedCategory}
+        onClearFilter={handleClearFilter}
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+        isEditMode={isEditMode}
+        onToggleEditMode={() => setIsEditMode((prev) => !prev)}
+        onAddClick={() => handleOpenAddModal(null)}
+        onOpenCloudSync={() => setIsCloudModalOpen(true)}
+        cloudConnected={Boolean(cloudEndpoint)}
+        firebaseLoggedIn={Boolean(firebaseUser)}
+        firebaseSyncing={firebaseSyncing}
+        isMinimized={isTopBarMinimized}
+        onToggleMinimized={() => setIsTopBarMinimized((prev) => !prev)}
+        directLaunchMode={Boolean(state.directLaunchMode)}
+        onToggleDirectLaunchMode={() =>
+          setState((prev) => ({
+            ...prev,
+            directLaunchMode: !prev.directLaunchMode,
+          }))
+        }
+        totalAppsCount={state.apps.length}
+      />
+
+      {/* Layer B: Dynamic Central Viewport (100% remaining height, zero page scroll) */}
+      <div className="relative flex-1 w-full min-h-0 overflow-hidden flex flex-col">
+        {state.viewMode === 'grid' && (
+          <DesktopGrid
+            apps={state.apps}
+            matchingAppIds={matchingAppIds}
+            hasActiveFilter={hasActiveFilter}
+            density={state.gridDensity}
+            isEditMode={isEditMode}
+            onActivateEditMode={() => setIsEditMode(true)}
+            onSelectApp={handlePrimaryAppClick}
+            onDoubleClickApp={handleDoubleClickApp}
+            onOpenExternal={handleOpenExternal}
+            onContextMenuApp={handleContextMenuApp}
+            onEditApp={handleOpenEditModal}
+            onDeleteApp={handleDeleteApp}
+            onAddAtSlot={(slotIdx) => handleOpenAddModal(slotIdx)}
+            onSwapSlots={handleSwapSlots}
+          />
         )}
 
-        {state.theme === 'midnight' && (
-          <>
-            <div className="absolute top-0 left-1/4 w-[600px] h-[400px] rounded-full bg-slate-800/20 blur-[150px]" />
-            <div className="absolute bottom-0 right-1/4 w-[500px] h-[400px] rounded-full bg-indigo-950/25 blur-[140px]" />
-          </>
+        {state.viewMode === 'sphere' && (
+          <SphereView
+            apps={state.apps}
+            matchingAppIds={matchingAppIds}
+            hasActiveFilter={hasActiveFilter}
+            onSelectApp={handlePrimaryAppClick}
+            onDoubleClickApp={handleDoubleClickApp}
+            onOpenExternal={handleOpenExternal}
+            onContextMenuApp={handleContextMenuApp}
+            onAddClick={() => handleOpenAddModal(null)}
+          />
         )}
 
-        {state.theme === 'cyber' && (
-          <>
-            <div className="absolute -top-24 left-1/3 w-[520px] h-[520px] rounded-full bg-fuchsia-600/15 blur-[140px]" />
-            <div className="absolute bottom-[-15%] right-1/4 w-[540px] h-[540px] rounded-full bg-cyan-500/15 blur-[140px]" />
-          </>
+        {state.viewMode === 'pixel-studio' && (
+          <PixelStudioView
+            apps={state.apps}
+            matchingAppIds={matchingAppIds}
+            hasActiveFilter={hasActiveFilter}
+            isInteractionPaused={isAnyOverlayOpen}
+            onEnterRetroOSWithFilter={(catFilter) => {
+              setRetroRoomFilter(catFilter || undefined);
+              setState((prev) => ({ ...prev, viewMode: 'retro-os' }));
+            }}
+            onPrimaryAppClick={handlePrimaryAppClick}
+            onOpenExternal={handleOpenExternal}
+            onEditApp={handleOpenEditModal}
+            onContextMenuApp={handleContextMenuApp}
+            onOpenNewAppModal={() => handleOpenAddModal(null)}
+          />
         )}
 
-        {state.theme === 'ocean' && (
-          <>
-            <div className="absolute -top-32 left-10 w-[560px] h-[560px] rounded-full bg-cyan-600/20 blur-[130px]" />
-            <div className="absolute bottom-[-10%] right-10 w-[560px] h-[560px] rounded-full bg-emerald-600/15 blur-[140px]" />
-          </>
+        {state.viewMode === 'retro-os' && (
+          <RetroOSView
+            apps={state.apps}
+            matchingAppIds={matchingAppIds}
+            hasActiveFilter={hasActiveFilter}
+            density={state.gridDensity}
+            isEditMode={isEditMode}
+            activeRoomCategoryFilter={retroRoomFilter}
+            onClearRoomFilter={() => setRetroRoomFilter(undefined)}
+            onBackToPixelStudio={() =>
+              setState((prev) => ({ ...prev, viewMode: 'pixel-studio' }))
+            }
+            onSelectApp={handlePrimaryAppClick}
+            onOpenExternal={handleOpenExternal}
+            onTransferToModernPreview={(app) => setPreviewApp(app)}
+            onContextMenuApp={handleContextMenuApp}
+            onEditApp={handleOpenEditModal}
+            onDeleteApp={handleDeleteApp}
+            onAddAtSlot={(slotIdx) => handleOpenAddModal(slotIdx)}
+            onSwapSlots={handleSwapSlots}
+          />
+        )}
+
+        {/* Contextual Onboarding Toast (4 seconds on first visit to each mode) */}
+        {onboardingToast && !swapToast && (
+          <div className="pointer-events-none fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-zinc-950/90 border border-indigo-500/40 shadow-2xl backdrop-blur-xl flex items-center gap-2 text-xs text-zinc-200 animate-in fade-in slide-in-from-bottom-2 duration-200">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span className="font-mono text-[11px]">{onboardingToast}</span>
+          </div>
+        )}
+
+        {/* Auto-Swap Feedback Toast */}
+        {swapToast && (
+          <div className="pointer-events-none fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-amber-950/95 border border-amber-400/50 shadow-2xl backdrop-blur-xl flex items-center gap-2 text-xs text-amber-100 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <ArrowRightLeft className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>{swapToast}</span>
+          </div>
         )}
       </div>
 
-      {/* Top OS Dock Bar */}
-      <TopBar
-        hubTitle={state.hubTitle}
-        onUpdateHubTitle={handleUpdateHubTitle}
+      {/* Layer C: Modals, Overlays & Custom Native Context Menu */}
+      <CommandPaletteModal
+        isOpen={isCommandPaletteOpen}
+        apps={state.apps}
         searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
         selectedCategory={selectedCategory}
+        onSearchChange={setSearchQuery}
         onCategoryChange={setSelectedCategory}
-        clickBehavior={state.clickBehavior}
-        onToggleClickBehavior={handleToggleClickBehavior}
-        viewMode={activeViewMode}
-        onChangeViewMode={handleChangeViewMode}
-        gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
-        onChangeGridColumns={(cols) =>
-          setState((prev) => ({
-            ...prev,
-            gridColumns: cols,
-            gridScale: cols === 4 ? 'compact' : prev.gridScale,
-          }))
-        }
-        gridScale={(state.gridScale || 'normal') as GridScale}
-        onChangeGridScale={(scale) =>
-          setState((prev) => ({ ...prev, gridScale: scale }))
-        }
-        theme={state.theme}
-        onChangeTheme={handleChangeTheme}
-        syncStatus={syncStatus}
-        isOrganizeMode={isOrganizeMode}
-        onToggleOrganizeMode={() => setIsOrganizeMode((prev) => !prev)}
-        onOpenNewAppModal={() => {
-          setEditingApp(null);
-          setTargetNewSlot(null);
-          setIsFormModalOpen(true);
-        }}
-        onOpenCloudModal={() => setIsCloudModalOpen(true)}
-        userEmail={currentUser?.email}
-        totalAppsCount={state.apps.length}
-        isMinimized={isMenuMinimized}
-        onToggleMinimize={handleToggleMinimizeMenu}
+        onClose={() => setIsCommandPaletteOpen(false)}
+        onSelectApp={(app) => setSpotlightApp(app)}
+        onOpenInternal={handleOpenInternal}
+        onOpenExternal={handleOpenExternal}
+        onEditApp={handleOpenEditModal}
+        onCreateNewApp={() => handleOpenAddModal(null)}
       />
 
-      {/* Main Single-Page Viewport: Grid | Sphere | Pixel Studio | Retro OS */}
-      {activeViewMode === 'sphere' ? (
-        <SphereView
-          apps={state.apps}
-          matchingAppIds={matchingAppIds}
-          hasActiveFilter={hasActiveFilter}
-          highlightedAppId={highlightedAppId}
-          onPrimaryAppClick={handlePrimaryAppClick}
-          onOpenLivePreview={(app) => setPreviewingApp(app)}
-          onOpenEditModal={(app) => {
-            setEditingApp(app);
-            setTargetNewSlot(app.slotIndex);
-            setIsFormModalOpen(true);
-          }}
-          onOpenNewAppAtSlot={(slotIndex) => {
-            setEditingApp(null);
-            setTargetNewSlot(slotIndex);
-            setIsFormModalOpen(true);
-          }}
-        />
-      ) : activeViewMode === 'pixel-studio' ? (
-        <PixelStudioView
-          apps={state.apps}
-          matchingAppIds={matchingAppIds}
-          hasActiveFilter={hasActiveFilter}
-          isInteractionPaused={Boolean(
-            highlightedAppId ||
-              isFormModalOpen ||
-              isCloudModalOpen ||
-              previewingApp
-          )}
-          onEnterRetroOSWithFilter={(catFilter) => {
-            setSelectedCategory(catFilter);
-            handleChangeViewMode('retro-os');
-          }}
-          onPrimaryAppClick={handlePrimaryAppClick}
-          onOpenNewAppModal={() => {
-            setEditingApp(null);
-            setTargetNewSlot(null);
-            setIsFormModalOpen(true);
-          }}
-        />
-      ) : activeViewMode === 'retro-os' ? (
-        <RetroOSView
-          apps={state.apps}
-          matchingAppIds={matchingAppIds}
-          hasActiveFilter={hasActiveFilter}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          selectedCategory={selectedCategory}
-          onCategoryChange={setSelectedCategory}
-          isOrganizeMode={isOrganizeMode}
-          onToggleOrganizeMode={() => setIsOrganizeMode((prev) => !prev)}
-          gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
-          onChangeGridColumns={(cols) =>
-            setState((prev) => ({
-              ...prev,
-              gridColumns: cols,
-              gridScale: cols === 4 ? 'compact' : prev.gridScale,
-            }))
-          }
-          gridScale={(state.gridScale || 'normal') as GridScale}
-          syncStatus={syncStatus}
-          onOpenEditModal={(app) => {
-            setEditingApp(app);
-            setTargetNewSlot(app.slotIndex);
-            setIsFormModalOpen(true);
-          }}
-          onOpenNewAppAtSlot={(slotIndex) => {
-            setEditingApp(null);
-            setTargetNewSlot(slotIndex);
-            setIsFormModalOpen(true);
-          }}
-          onOpenNewAppModal={() => {
-            setEditingApp(null);
-            setTargetNewSlot(null);
-            setIsFormModalOpen(true);
-          }}
-          onOpenCloudModal={() => setIsCloudModalOpen(true)}
-          onMoveOrSwapSlot={handleMoveOrSwapSlot}
-          onBackToPixelStudio={() => handleChangeViewMode('pixel-studio')}
-        />
-      ) : (
-        <DesktopGrid
-          apps={state.apps}
-          matchingAppIds={matchingAppIds}
-          hasActiveFilter={hasActiveFilter}
-          isOrganizeMode={isOrganizeMode}
-          gridColumns={(state.gridColumns || 8) as GridColumnsPerRow}
-          gridScale={(state.gridScale || 'normal') as GridScale}
-          highlightedAppId={highlightedAppId}
-          onPrimaryAppClick={handlePrimaryAppClick}
-          onOpenLivePreview={(app) => setPreviewingApp(app)}
-          onOpenEditModal={(app) => {
-            setEditingApp(app);
-            setTargetNewSlot(app.slotIndex);
-            setIsFormModalOpen(true);
-          }}
-          onOpenNewAppAtSlot={(slotIndex) => {
-            setEditingApp(null);
-            setTargetNewSlot(slotIndex);
-            setIsFormModalOpen(true);
-          }}
-          onMoveOrSwapSlot={handleMoveOrSwapSlot}
-        />
-      )}
+      <AppContextMenu
+        menu={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onOpenInternal={handleOpenInternal}
+        onOpenExternal={handleOpenExternal}
+        onEditApp={handleOpenEditModal}
+        onToggleExternalOnly={handleToggleExternalOnly}
+        onDeleteApp={handleDeleteApp}
+      />
 
-      {/* Offline Connectivity Banner */}
-      <OfflineIndicator />
-
-      {/* Subtle Floating Toast Feedback */}
-      {toastMessage && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-2xl bg-slate-900/90 backdrop-blur-xl border border-white/15 text-xs font-medium text-slate-100 shadow-2xl"
-        >
-          {toastMessage}
-        </div>
-      )}
-
-      {/* Highlighted App Spotlight Modal (Sonoma Spotlight for Grid, Sphere & Pixel Studio) */}
       <AppSpotlightModal
-        app={highlightedApp}
-        onClose={() => setHighlightedAppId(null)}
-        onOpenInApp={(app) => setPreviewingApp(app)}
-        onOpenEdit={(app) => {
-          setEditingApp(app);
-          setTargetNewSlot(app.slotIndex);
-          setIsFormModalOpen(true);
-        }}
+        app={spotlightApp}
+        onClose={() => setSpotlightApp(null)}
+        onOpenInternal={handleOpenInternal}
+        onOpenExternal={handleOpenExternal}
+        onEdit={handleOpenEditModal}
+        onToggleExternalOnly={handleToggleExternalOnly}
       />
 
-      {/* + Novo Web App / Edit Modal */}
-      <AppFormModal
-        isOpen={isFormModalOpen}
-        editingApp={editingApp}
-        initialSlotIndex={targetNewSlot}
-        existingApps={state.apps}
-        ownerId={currentUser?.uid || 'local'}
-        onClose={() => {
-          setIsFormModalOpen(false);
-          setEditingApp(null);
-          setTargetNewSlot(null);
-        }}
-        onSave={handleSaveApp}
-        onDelete={handleDeleteApp}
-      />
-
-      {/* macOS Sonoma / Full-Screen Mobile Live Preview Window */}
       <LivePreviewModal
-        app={previewingApp}
-        onClose={() => setPreviewingApp(null)}
+        app={previewApp}
+        onClose={() => setPreviewApp(null)}
+        onOpenExternal={handleOpenExternal}
+        onToggleExternalOnly={handleToggleExternalOnly}
       />
 
-      {/* Cloud Sync & Backup Modal */}
+      <AppFormModal
+        isOpen={isFormOpen}
+        initialData={editingApp}
+        targetSlot={targetSlotForNew}
+        existingApps={state.apps}
+        onClose={() => setIsFormOpen(false)}
+        onSave={handleSaveApp}
+      />
+
       <CloudSyncModal
         isOpen={isCloudModalOpen}
         onClose={() => setIsCloudModalOpen(false)}
-        currentUser={currentUser}
+        currentUser={firebaseUser}
         onSignInGoogle={async () => {
-          try {
-            await signInWithGoogle();
-            showToast('Conectado com Google com sucesso!');
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (!msg.includes('popup-closed-by-user')) {
-              showToast('Não foi possível autenticar com Google no momento.');
-            }
-          }
+          await loginWithGoogleFirebase();
         }}
         onSignOutGoogle={async () => {
-          try {
-            await signOutUser();
-            showToast('Sessão desconectada.');
-          } catch {
-            // ignore
-          }
+          await logoutFirebase();
         }}
-        cloudRestUrl={state.cloudRestUrl}
+        cloudRestUrl={cloudEndpoint}
         onSaveCloudRestUrl={(url) => {
+          setCloudEndpoint(url);
+          localStorage.setItem(CLOUD_ENDPOINT_KEY, url);
           setState((prev) => ({ ...prev, cloudRestUrl: url }));
         }}
-        onSyncNow={handleSyncNow}
-        syncStatus={syncStatus}
-        lastSyncedAt={state.lastSyncedAt || null}
+        onSyncNow={async () => {
+          if (firebaseUser) {
+            setFirebaseSyncing(true);
+            try {
+              await saveLauncherToFirestore(firebaseUser, state);
+              setLastSyncedAt(Date.now());
+            } finally {
+              setFirebaseSyncing(false);
+            }
+          } else if (cloudEndpoint) {
+            await fetch(cloudEndpoint, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(state),
+            });
+            setLastSyncedAt(Date.now());
+          }
+        }}
+        syncStatus={
+          firebaseSyncing
+            ? 'syncing'
+            : firebaseError
+              ? 'error'
+              : firebaseUser || cloudEndpoint
+                ? 'online'
+                : 'local'
+        }
+        lastSyncedAt={
+          lastSyncedAt ? new Date(lastSyncedAt).toISOString() : null
+        }
         launcherState={state}
-        onImportBackup={handleImportBackup}
-        onRestoreDemoApps={handleRestoreDemoApps}
+        onImportBackup={(imported) => {
+          const sanitized = sanitizeLauncherPayload({
+            ...state,
+            ...imported,
+          });
+          if (sanitized) {
+            setState(sanitized);
+            showSwapToast('Backup importado com sucesso!');
+          }
+        }}
+        onRestoreDemoApps={() => {
+          setState({
+            hubTitle: 'My Web Creations Hub',
+            theme: 'aurora',
+            wallpaperTheme: 'aurora',
+            clickBehavior: 'preview',
+            directLaunchMode: false,
+            viewMode: 'grid',
+            gridDensity: 'normal',
+            cloudRestUrl: cloudEndpoint,
+            apps: INITIAL_DEMO_APPS,
+          });
+          showSwapToast('Grade restaurada para o padrão inicial.');
+        }}
       />
     </div>
   );
 }
+
+export default App;

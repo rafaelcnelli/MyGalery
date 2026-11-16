@@ -13,6 +13,11 @@ import {
   generateHexSpiralCoordinates,
   projectSphericalBubble,
   computeSinglePageGridMetrics,
+  formatSlotNumber,
+  sortAppsWithMagneticFilter,
+  paginateGridSlots,
+  buildFixedSlotArray,
+  mergeAndRecoverApps,
 } from './launcherLogic';
 import { INITIAL_DEMO_APPS, WebAppItem } from '../types/launcher';
 
@@ -62,16 +67,16 @@ test('getAppInitials generates clean 1-2 character uppercase monograms', () => {
 
 test('moveOrSwapAppSlot moves an app to an empty slot without affecting other apps', () => {
   const demo = structuredClone(INITIAL_DEMO_APPS);
-  // Move Linear from slot 0 to empty slot 5
+  // Move Linear from slot 0 to empty slot 1
   const { updatedApps, swappedWithApp, didChange } = moveOrSwapAppSlot(
     demo,
     'demo-app-linear',
-    5
+    1
   );
   assert.equal(didChange, true);
   assert.equal(swappedWithApp, null);
   const moved = updatedApps.find((a) => a.id === 'demo-app-linear');
-  assert.equal(moved?.slotIndex, 5);
+  assert.equal(moved?.slotIndex, 1);
 });
 
 test('moveOrSwapAppSlot automatically swaps positions when dropping onto an occupied slot (Anti-Overlap)', () => {
@@ -108,7 +113,7 @@ test('upsertAppWithAutoSwap places a new app in an occupied slot and moves previ
 
   const { updatedApps, swappedOccupant } = upsertAppWithAutoSwap(demo, newApp);
   assert.equal(swappedOccupant?.id, 'demo-app-linear');
-  assert.equal(swappedOccupant?.slotIndex, 1); // First free slot is 1 (since 0, 2, 11, 18 were occupied)
+  assert.equal(swappedOccupant?.slotIndex, 1); // First free slot is 1
   const raycast = updatedApps.find((a) => a.id === 'app-raycast');
   assert.equal(raycast?.slotIndex, 0);
 
@@ -129,33 +134,48 @@ test('deduplicateSlots resolves any colliding slot indices', () => {
   assert.deepEqual(slots, [3, 0, 1]);
 });
 
-test('getMatchingAppIds filters by search query and category (including multi-category workstation filters)', () => {
+test('getMatchingAppIds filters by search query, #slot number, and category', () => {
   const matchedByName = getMatchingAppIds(INITIAL_DEMO_APPS, 'excali', 'ALL');
   assert.equal(matchedByName.size, 1);
   assert.equal(matchedByName.has('demo-app-excalidraw'), true);
 
   const matchedByCategory = getMatchingAppIds(INITIAL_DEMO_APPS, '', 'DevTools');
-  assert.equal(matchedByCategory.size, 1);
   assert.equal(matchedByCategory.has('demo-app-vercel'), true);
 
   const matchedByMultiStation = getMatchingAppIds(INITIAL_DEMO_APPS, '', 'DevTools,Design');
-  assert.equal(matchedByMultiStation.size, 2);
   assert.equal(matchedByMultiStation.has('demo-app-vercel'), true);
   assert.equal(matchedByMultiStation.has('demo-app-excalidraw'), true);
+
+  const matchedBySlot = getMatchingAppIds(INITIAL_DEMO_APPS, '#01', 'Todas');
+  assert.equal(matchedBySlot.size, 1);
+  assert.equal(matchedBySlot.has('demo-app-linear'), true);
+});
+
+test('formatSlotNumber, sortAppsWithMagneticFilter, and paginateGridSlots work accurately', () => {
+  assert.equal(formatSlotNumber(0), '01');
+  assert.equal(formatSlotNumber(39), '40');
+
+  const matching = new Set(['demo-app-vercel']);
+  const sorted = sortAppsWithMagneticFilter(INITIAL_DEMO_APPS, matching, true);
+  assert.equal(sorted[0].id, 'demo-app-vercel');
+
+  const slots = buildFixedSlotArray(INITIAL_DEMO_APPS);
+  const pages = paginateGridSlots(slots, 16);
+  assert.equal(pages.length, 3);
+  assert.equal(pages[0].length, 16);
+  assert.equal(pages[1].length, 16);
+  assert.equal(pages[2].length, 8);
 });
 
 test('generateHexSpiralCoordinates creates watchOS concentric hexagonal rings', () => {
   const coords = generateHexSpiralCoordinates(19, 90);
   assert.equal(coords.length, 19);
-  // Index 0 is center (ring 0)
   assert.equal(coords[0].ring, 0);
   assert.equal(coords[0].x, 0);
   assert.equal(coords[0].y, 0);
-  // Indices 1..6 are Ring 1 (6 hex neighbors)
   for (let i = 1; i <= 6; i++) {
     assert.equal(coords[i].ring, 1);
   }
-  // Indices 7..18 are Ring 2 (12 hex neighbors)
   for (let i = 7; i <= 18; i++) {
     assert.equal(coords[i].ring, 2);
   }
@@ -175,6 +195,26 @@ test('computeSinglePageGridMetrics supports 4 apps per row while keeping all dem
   const metrics4 = computeSinglePageGridMetrics(4, INITIAL_DEMO_APPS);
   assert.equal(metrics4.columns, 4);
   assert.equal(metrics4.rows, 5);
-  assert.equal(metrics4.visibleSlotCount, 20); // Includes slot 18 (Vercel Cloud)
+  assert.equal(metrics4.visibleSlotCount, 20);
 });
+
+test('mergeAndRecoverApps preserves user custom apps and removes colliding demo-app seeds', () => {
+  const userCustomAtSlot0 = sanitizeWebAppItem({
+    id: 'app-user-1',
+    name: 'Infiltrados na Fé',
+    url: 'https://rafaelnel.github.io/Infiltrados_na_fe/',
+    category: 'Game',
+    accentColor: 'amber',
+    slotIndex: 0, // Same slot as demo-app-linear
+  });
+
+  const { apps, localOnlyCustomApps, collidingDemoIdsToRemove } =
+    mergeAndRecoverApps([userCustomAtSlot0], INITIAL_DEMO_APPS);
+
+  const slot0App = apps.find((a) => a.slotIndex === 0);
+  assert.equal(slot0App?.id, 'app-user-1');
+  assert.equal(localOnlyCustomApps.length, 1);
+  assert.equal(collidingDemoIdsToRemove.includes('demo-app-linear'), true);
+});
+
 

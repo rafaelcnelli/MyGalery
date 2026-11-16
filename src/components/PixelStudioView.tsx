@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Plus, Monitor, ArrowRight, Footprints } from 'lucide-react';
+import { Plus, Monitor, ArrowRight, Footprints, Server, X, ExternalLink, Edit2 } from 'lucide-react';
 import { WebAppItem } from '../types/launcher';
+import { formatSlotNumber } from '../utils/launcherLogic';
 import { AppLogo } from './AppLogo';
 import {
   CharacterDirection,
   PLAYER_SPAWN_POS,
   PlacedAppTerminal,
+  RoamingStudioNPCState,
   STUDIO_MAP_COLS,
   STUDIO_MAP_ROWS,
   STUDIO_ROOMS,
@@ -16,18 +18,23 @@ import {
   TileCoord,
   assignAppsToRoomDesks,
   buildStudioCollisionGrid,
+  createInitialRoamingNPCs,
   findNearestWalkableTile,
   findShortestTilePath,
   getRoomAtPosition,
   moveWithCollision,
+  stepRoamingNPCs,
 } from '../utils/pixelStudioWorld';
 import {
+  ACCENT_HEX_MAP,
+  AppFurnitureStation,
   IndieDevPlayerSprite,
   PixelAgentSprite,
   PixelCRTMonitorSVG,
+  PixelDeveloperNPCSprite,
   StudioDecorSprite,
-  getDeskSurfaceClasses,
 } from './PixelStudioSprites';
+import { PixelStudioMiniMap } from './PixelStudioMiniMap';
 
 interface PixelStudioViewProps {
   apps: WebAppItem[];
@@ -35,12 +42,15 @@ interface PixelStudioViewProps {
   hasActiveFilter: boolean;
   isInteractionPaused?: boolean;
   onEnterRetroOSWithFilter: (categoryFilter: string) => void;
-  onPrimaryAppClick: (app: WebAppItem) => void;
+  onPrimaryAppClick: (app: WebAppItem, e?: React.MouseEvent) => void;
+  onOpenExternal?: (app: WebAppItem) => void;
+  onEditApp?: (app: WebAppItem) => void;
+  onContextMenuApp?: (app: WebAppItem, e: React.MouseEvent) => void;
   onOpenNewAppModal: () => void;
 }
 
 type PendingArrivalAction =
-  | { type: 'app'; app: WebAppItem }
+  | { type: 'app'; placed: PlacedAppTerminal }
   | { type: 'crt'; roomId: string; categoryFilter: string }
   | null;
 
@@ -100,20 +110,31 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
   isInteractionPaused = false,
   onEnterRetroOSWithFilter,
   onPrimaryAppClick,
+  onOpenExternal,
+  onEditApp,
+  onContextMenuApp,
   onOpenNewAppModal,
 }) => {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewportSize, setViewportSize] = useState({ width: 1200, height: 680 });
+  const [isCloseZoom, setIsCloseZoom] = useState(true);
+  const [isMiniMapCollapsed, setIsMiniMapCollapsed] = useState(false);
+  const [activeClusterTerminal, setActiveClusterTerminal] =
+    useState<PlacedAppTerminal | null>(null);
   const [zoomingTargetId, setZoomingTargetId] = useState<string | null>(null);
 
-  // World data derived from current apps
+  const cameraZoom = isCloseZoom
+    ? viewportSize.width >= 768
+      ? 1.28
+      : 1.08
+    : 1;
+
   const placedApps = useMemo(() => assignAppsToRoomDesks(apps), [apps]);
   const collisionGrid = useMemo(
     () => buildStudioCollisionGrid(placedApps),
     [placedApps]
   );
 
-  // Player state (refs for 60fps loop + throttled React render state)
   const playerPosRef = useRef({ ...PLAYER_SPAWN_POS });
   const directionRef = useRef<CharacterDirection>('down');
   const walkFrameRef = useRef<0 | 1>(0);
@@ -129,10 +150,14 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     isMoving: false,
     walkFrame: 0 as 0 | 1,
   });
+  const [roamingNPCs, setRoamingNPCs] = useState<RoamingStudioNPCState[]>(() =>
+    createInitialRoamingNPCs(collisionGrid)
+  );
+  const roamingNPCsRef = useRef<RoamingStudioNPCState[]>(roamingNPCs);
+  const npcSyncAccumRef = useRef(0);
   const [activePathPreview, setActivePathPreview] = useState<TileCoord[]>([]);
   const [targetAppId, setTargetAppId] = useState<string | null>(null);
 
-  // Measure viewport container dynamically for responsive camera follow
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
@@ -160,7 +185,6 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     [onEnterRetroOSWithFilter]
   );
 
-  // Find nearest interactable terminal / CRT within proximity
   const playerTile = useMemo(
     () => ({
       col: playerRender.x / STUDIO_TILE_SIZE,
@@ -209,32 +233,40 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     return placedApps.filter((p) => p.roomId === currentRoom.id).length;
   }, [apps.length, currentRoom.id, placedApps]);
 
-  // Execute arrival action when character reaches clicked App or CRT
+  const openPlacedTerminal = useCallback(
+    (placed: PlacedAppTerminal, e?: React.MouseEvent) => {
+      if (placed.isClusterRack && placed.clusterApps && placed.clusterApps.length > 0) {
+        setActiveClusterTerminal(placed);
+      } else {
+        onPrimaryAppClick(placed.app, e);
+      }
+    },
+    [onPrimaryAppClick]
+  );
+
   const handleArrivalAction = useCallback(
     (action: PendingArrivalAction) => {
       if (!action) return;
       setTargetAppId(null);
       if (action.type === 'app') {
-        onPrimaryAppClick(action.app);
+        openPlacedTerminal(action.placed);
       } else if (action.type === 'crt') {
         triggerZoomIntoRetroOS(action.roomId, action.categoryFilter);
       }
     },
-    [onPrimaryAppClick, triggerZoomIntoRetroOS]
+    [openPlacedTerminal, triggerZoomIntoRetroOS]
   );
 
-  // Trigger interaction via Space/Enter/E or proximity CTA
   const handleActivateNearby = useCallback(() => {
     if (nearbyApp) {
-      onPrimaryAppClick(nearbyApp.app);
+      openPlacedTerminal(nearbyApp);
       return;
     }
     if (nearbyCRT) {
       triggerZoomIntoRetroOS(nearbyCRT.id, nearbyCRT.categoryFilter);
     }
-  }, [nearbyApp, nearbyCRT, onPrimaryAppClick, triggerZoomIntoRetroOS]);
+  }, [nearbyApp, nearbyCRT, openPlacedTerminal, triggerZoomIntoRetroOS]);
 
-  // Keyboard Listeners (WASD / ArrowKeys / Shift / Space / Enter / E)
   useEffect(() => {
     const isInputFocused = (target: EventTarget | null) => {
       const el = (target as HTMLElement) || document.activeElement;
@@ -256,14 +288,21 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
 
       const key = e.key.toLowerCase();
       if (
-        ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(
-          key
-        )
+        [
+          'w',
+          'a',
+          's',
+          'd',
+          'arrowup',
+          'arrowdown',
+          'arrowleft',
+          'arrowright',
+          'shift',
+        ].includes(key)
       ) {
         if (key.startsWith('arrow')) e.preventDefault();
         pressedKeysRef.current.add(key);
 
-        // Manual directional input cancels auto-walk pathfinding
         if (key !== 'shift' && pathQueueRef.current.length > 0) {
           pathQueueRef.current = [];
           pendingActionRef.current = null;
@@ -275,6 +314,9 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
           e.preventDefault();
           handleActivateNearby();
         }
+      } else if (key === 'm' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setIsMiniMapCollapsed((prev) => !prev);
       }
     };
 
@@ -302,7 +344,6 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     zoomingTargetId,
   ]);
 
-  // 60fps Animation & Movement Loop (Keyboard + BFS Auto-Walk)
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
@@ -321,7 +362,7 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
         if (keys.has('w') || keys.has('arrowup')) vy -= 1;
         if (keys.has('s') || keys.has('arrowdown')) vy += 1;
 
-        const speed = keys.has('shift') ? 390 : 275; // px per second
+        const speed = keys.has('shift') ? 390 : 275;
         let movedThisFrame = false;
 
         if (vx !== 0 || vy !== 0) {
@@ -357,7 +398,6 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             movedThisFrame = true;
           }
         } else if (pathQueueRef.current.length > 0) {
-          // Follow BFS waypoints smoothly
           const waypoint = pathQueueRef.current[0];
           const targetX = (waypoint.col + 0.5) * STUDIO_TILE_SIZE;
           const targetY = (waypoint.row + 0.5) * STUDIO_TILE_SIZE;
@@ -384,7 +424,6 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             if (pathQueueRef.current.length === 0 && pendingActionRef.current) {
               const actionToRun = pendingActionRef.current;
               pendingActionRef.current = null;
-              // Face upward toward desk/CRT when arriving
               directionRef.current = 'up';
               handleArrivalAction(actionToRun);
             }
@@ -419,6 +458,18 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             walkFrame: walkFrameRef.current,
           };
         });
+
+        // Advance autonomous roaming developer NPCs across rooms & corridors
+        roamingNPCsRef.current = stepRoamingNPCs(
+          roamingNPCsRef.current,
+          collisionGrid,
+          dt
+        );
+        npcSyncAccumRef.current += dt;
+        if (npcSyncAccumRef.current >= 0.055) {
+          npcSyncAccumRef.current = 0;
+          setRoamingNPCs(roamingNPCsRef.current);
+        }
       }
 
       rafId = window.requestAnimationFrame(tick);
@@ -433,7 +484,6 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     zoomingTargetId,
   ]);
 
-  // Walk character to a specific tile coordinate
   const walkToTile = useCallback(
     (
       goalCol: number,
@@ -476,8 +526,8 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
 
   const handleFloorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const worldX = e.clientX - rect.left;
-    const worldY = e.clientY - rect.top;
+    const worldX = (e.clientX - rect.left) / cameraZoom;
+    const worldY = (e.clientY - rect.top) / cameraZoom;
     const col = Math.floor(worldX / STUDIO_TILE_SIZE);
     const row = Math.floor(worldY / STUDIO_TILE_SIZE);
     walkToTile(col, row, null, null);
@@ -492,16 +542,41 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     const cy = placed.row + 0.5;
     const dist = Math.hypot(playerTile.col - cx, playerTile.row - cy);
     if (dist <= 1.65) {
-      onPrimaryAppClick(placed.app);
+      openPlacedTerminal(placed, e);
       return;
     }
     walkToTile(
       placed.interactTile.col,
       placed.interactTile.row,
-      { type: 'app', app: placed.app },
+      { type: 'app', placed },
       placed.app.id
     );
   };
+
+  const handleTeleportToRoom = useCallback(
+    (room: StudioRoomDef) => {
+      const targetTile = room.teleportTile || room.centerTile;
+      const walkable =
+        findNearestWalkableTile(collisionGrid, targetTile.col, targetTile.row) ||
+        targetTile;
+      const newX = (walkable.col + 0.5) * STUDIO_TILE_SIZE;
+      const newY = (walkable.row + 0.5) * STUDIO_TILE_SIZE;
+      pathQueueRef.current = [];
+      pendingActionRef.current = null;
+      setActivePathPreview([]);
+      setTargetAppId(null);
+      playerPosRef.current = { x: newX, y: newY };
+      directionRef.current = 'down';
+      setPlayerRender({
+        x: newX,
+        y: newY,
+        direction: 'down',
+        isMoving: false,
+        walkFrame: 0,
+      });
+    },
+    [collisionGrid]
+  );
 
   const handleCRTClick = (e: React.MouseEvent, room: StudioRoomDef) => {
     e.stopPropagation();
@@ -524,26 +599,28 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
     walkToTile(room.centerTile.col, room.centerTile.row, null, null);
   };
 
-  // Compute smooth clamped 2D camera offset
+  const scaledWorldW = STUDIO_WORLD_WIDTH * cameraZoom;
+  const scaledWorldH = STUDIO_WORLD_HEIGHT * cameraZoom;
+
   const camX =
-    viewportSize.width >= STUDIO_WORLD_WIDTH
-      ? -Math.round((viewportSize.width - STUDIO_WORLD_WIDTH) / 2)
+    viewportSize.width >= scaledWorldW
+      ? -Math.round((viewportSize.width - scaledWorldW) / 2)
       : Math.max(
           0,
           Math.min(
-            STUDIO_WORLD_WIDTH - viewportSize.width,
-            Math.round(playerRender.x - viewportSize.width / 2)
+            scaledWorldW - viewportSize.width,
+            Math.round(playerRender.x * cameraZoom - viewportSize.width / 2)
           )
         );
 
   const camY =
-    viewportSize.height >= STUDIO_WORLD_HEIGHT
-      ? -Math.round((viewportSize.height - STUDIO_WORLD_HEIGHT) / 2)
+    viewportSize.height >= scaledWorldH
+      ? -Math.round((viewportSize.height - scaledWorldH) / 2)
       : Math.max(
           0,
           Math.min(
-            STUDIO_WORLD_HEIGHT - viewportSize.height,
-            Math.round(playerRender.y - viewportSize.height / 2)
+            scaledWorldH - viewportSize.height,
+            Math.round(playerRender.y * cameraZoom - viewportSize.height / 2)
           )
         );
 
@@ -553,9 +630,8 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
       aria-label="Estúdio Indie Interativo em Pixel Art"
       className="relative z-10 flex-1 w-full h-full min-h-0 overflow-hidden px-2 sm:px-4 pb-2 pt-1 flex flex-col gap-1.5 select-none"
     >
-      {/* Top Studio HUD: Current Room Status (unboxed text) + Room Quick-Walk Switcher */}
+      {/* Top Studio HUD */}
       <div className="relative z-20 w-full max-w-[1600px] mx-auto px-3 py-1.5 rounded-xl bg-slate-950/90 border border-white/10 shadow-lg flex flex-wrap items-center justify-between gap-2 shrink-0">
-        {/* Clean Unboxed Room & Count Metadata */}
         <div className="flex items-center gap-2 min-w-0">
           <Footprints className="w-3.5 h-3.5 text-amber-300 shrink-0" />
           <span
@@ -568,12 +644,10 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             ·
           </span>
           <span className="font-mono tabular-nums text-xs text-slate-300 whitespace-nowrap">
-            {appsInCurrentRoom}{' '}
-            {appsInCurrentRoom === 1 ? 'app' : 'apps'}
+            {appsInCurrentRoom} {appsInCurrentRoom === 1 ? 'app' : 'apps'}
           </span>
         </div>
 
-        {/* Interactive Room Quick-Nav Buttons (Character walks there automatically) */}
         <div className="flex items-center gap-1 overflow-x-auto max-w-full">
           <div
             role="group"
@@ -614,20 +688,20 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
       {/* Interactive 2D Pixel World Viewport */}
       <div
         ref={viewportRef}
-        className={`relative flex-1 w-full max-w-[1600px] mx-auto min-h-0 rounded-2xl bg-slate-950 border-2 border-slate-700/90 shadow-[inset_0_0_50px_rgba(0,0,0,0.9)] overflow-hidden transition-all duration-300 ease-out ${
+        className={`relative flex-1 w-full max-w-[1600px] mx-auto min-h-0 rounded-2xl bg-[#090b10] border-2 border-slate-700/90 shadow-[inset_0_0_50px_rgba(0,0,0,0.9)] overflow-hidden transition-all duration-300 ease-out ${
           zoomingTargetId ? 'scale-[1.45] opacity-0' : 'scale-100 opacity-100'
         }`}
       >
-        {/* World Space Layer (1360x880 translated smoothly via GPU) */}
         <div
           onClick={handleFloorClick}
           data-testid="pixel-studio-world"
           style={{
             width: STUDIO_WORLD_WIDTH,
             height: STUDIO_WORLD_HEIGHT,
-            transform: `translate3d(${-camX}px, ${-camY}px, 0)`,
+            transformOrigin: '0 0',
+            transform: `translate3d(${-camX}px, ${-camY}px, 0) scale(${cameraZoom})`,
           }}
-          className="relative cursor-crosshair will-change-transform"
+          className="relative cursor-crosshair will-change-transform pixelated"
         >
           {/* 1. Base Connecting Lobby & Corridor Floor */}
           <div
@@ -635,7 +709,7 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             aria-hidden="true"
           />
 
-          {/* 2. Custom Themed Room Floor Zones */}
+          {/* 2. Custom Themed Room Floor Zones + Upper Wall Trim (Reference Image Aesthetic) */}
           {STUDIO_ROOMS.filter((r) => r.id !== 'central-lobby').map((room) => (
             <div
               key={room.id}
@@ -651,11 +725,34 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                   STUDIO_TILE_SIZE,
                 borderColor: room.borderHex,
               }}
-              className={`absolute ${room.floorClass} border pointer-events-none`}
+              className={`absolute ${room.floorClass} border pointer-events-none overflow-hidden`}
             >
-              {/* Subtle Floor Room Sign Etching */}
+              {/* Top Wall Backdrop Strip behind wall furniture */}
               <div
-                className="absolute top-1.5 left-1/2 -translate-x-1/2 font-pixel text-xs tracking-wider opacity-85 whitespace-nowrap px-2 py-0.5 bg-slate-950/65 rounded border border-white/10"
+                style={{
+                  height: STUDIO_TILE_SIZE + 4,
+                  backgroundColor: room.wallColorHex,
+                  borderBottom: `4px solid ${room.wallTrimHex}`,
+                  boxShadow: 'inset 0 2px 0 rgba(255,255,255,0.22)',
+                }}
+                className="w-full opacity-95"
+              />
+
+              {/* Subtle Pixel Floor Dash Speckles (Reference Image Floor Grain) */}
+              <div
+                aria-hidden="true"
+                style={{
+                  backgroundImage:
+                    'radial-gradient(rgba(255,255,255,0.16) 1px, transparent 1px), radial-gradient(rgba(0,0,0,0.28) 1px, transparent 1px)',
+                  backgroundSize: '36px 28px',
+                  backgroundPosition: '6px 10px, 20px 22px',
+                }}
+                className="absolute inset-x-0 bottom-0 top-[44px] opacity-60 pointer-events-none"
+              />
+
+              {/* Subtle Room Floor Title Plate */}
+              <div
+                className="absolute bottom-1.5 left-1/2 -translate-x-1/2 font-pixel text-[11px] tracking-wider opacity-90 whitespace-nowrap px-2 py-0.5 bg-slate-950/85 rounded-xs border border-white/15"
                 style={{ color: room.accentHex }}
               >
                 {room.title}
@@ -663,7 +760,108 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             </div>
           ))}
 
-          {/* Central Lobby Indigo Rug */}
+          {/* Room Center Rugs & Decorative Floor Details */}
+          {/* Design & Social Geometric Studio Rug */}
+          <div
+            style={{
+              left: 25 * STUDIO_TILE_SIZE,
+              top: 4 * STUDIO_TILE_SIZE,
+              width: 4 * STUDIO_TILE_SIZE,
+              height: 3 * STUDIO_TILE_SIZE,
+            }}
+            className="absolute bg-fuchsia-900/25 border-2 border-dashed border-fuchsia-400/35 rounded-xs pointer-events-none"
+          />
+
+          {/* Finance & Ops Window Sunbeams & Office Floor Details (Reference Image Style) */}
+          <div
+            style={{
+              left: 1.5 * STUDIO_TILE_SIZE,
+              top: 14.05 * STUDIO_TILE_SIZE,
+              width: 3.3 * STUDIO_TILE_SIZE,
+              height: 1.45 * STUDIO_TILE_SIZE,
+            }}
+            className="absolute flex gap-2 pointer-events-none"
+            aria-hidden="true"
+          >
+            <div className="flex-1 h-full bg-white/18 -skew-x-[28deg]" />
+            <div className="flex-1 h-full bg-white/18 -skew-x-[28deg]" />
+            <div className="flex-1 h-full bg-white/18 -skew-x-[28deg]" />
+          </div>
+          <div
+            style={{
+              left: 4.5 * STUDIO_TILE_SIZE,
+              top: 16.5 * STUDIO_TILE_SIZE,
+              width: 3.8 * STUDIO_TILE_SIZE,
+              height: 2.6 * STUDIO_TILE_SIZE,
+            }}
+            className="absolute bg-amber-900/15 border-2 border-amber-400/20 rounded-xs pointer-events-none"
+          />
+
+          {/* DevTools & IA + Finance Power Cable Lines */}
+          <svg
+            width={STUDIO_WORLD_WIDTH}
+            height={STUDIO_WORLD_HEIGHT}
+            className="absolute inset-0 pointer-events-none"
+            aria-hidden="true"
+          >
+            {/* Reference Image Power Cable from Wall Outlet to Paired Wooden Desks */}
+            <path
+              d={`M ${4.55 * STUDIO_TILE_SIZE} ${13.95 * STUDIO_TILE_SIZE} H ${3.8 * STUDIO_TILE_SIZE} V ${17.1 * STUDIO_TILE_SIZE} H ${5.6 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#0b0d14"
+              strokeWidth="2.5"
+            />
+            {/* Glowing Tech Cables radiating from Central Retro OS Rug to the 4 Room Doorways */}
+            <path
+              d={`M ${15 * STUDIO_TILE_SIZE} ${9.5 * STUDIO_TILE_SIZE} H ${12.5 * STUDIO_TILE_SIZE} V ${5.8 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#10b981"
+              strokeWidth="3"
+              strokeDasharray="6 4"
+              opacity="0.65"
+            />
+            <path
+              d={`M ${19 * STUDIO_TILE_SIZE} ${9.5 * STUDIO_TILE_SIZE} H ${21.5 * STUDIO_TILE_SIZE} V ${5.8 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#d946ef"
+              strokeWidth="3"
+              strokeDasharray="6 4"
+              opacity="0.65"
+            />
+            <path
+              d={`M ${15 * STUDIO_TILE_SIZE} ${10.5 * STUDIO_TILE_SIZE} H ${12.5 * STUDIO_TILE_SIZE} V ${15.8 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#f59e0b"
+              strokeWidth="3"
+              strokeDasharray="6 4"
+              opacity="0.65"
+            />
+            <path
+              d={`M ${19 * STUDIO_TILE_SIZE} ${10.5 * STUDIO_TILE_SIZE} H ${21.5 * STUDIO_TILE_SIZE} V ${15.8 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#06b6d4"
+              strokeWidth="3"
+              strokeDasharray="6 4"
+              opacity="0.65"
+            />
+            {/* Hacker Lab floor cable from server racks */}
+            <path
+              d={`M ${2.5 * STUDIO_TILE_SIZE} ${2 * STUDIO_TILE_SIZE} V ${3 * STUDIO_TILE_SIZE} H ${8.5 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#0f172a"
+              strokeWidth="3"
+            />
+            <path
+              d={`M ${2.5 * STUDIO_TILE_SIZE} ${2 * STUDIO_TILE_SIZE} V ${3 * STUDIO_TILE_SIZE} H ${8.5 * STUDIO_TILE_SIZE}`}
+              fill="none"
+              stroke="#10b981"
+              strokeWidth="1.5"
+              strokeDasharray="4 4"
+              opacity="0.7"
+            />
+          </svg>
+
+          {/* Central Lobby Technological Rug under Master Retro OS Desk */}
           <div
             style={{
               left: 15 * STUDIO_TILE_SIZE,
@@ -671,8 +869,12 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
               width: 4 * STUDIO_TILE_SIZE,
               height: 4 * STUDIO_TILE_SIZE,
             }}
-            className="absolute bg-indigo-950/70 border-2 border-indigo-400/35 rounded-md pointer-events-none"
-          />
+            className="absolute bg-indigo-950/85 border-2 border-cyan-400/50 rounded-xs shadow-[0_0_24px_rgba(56,189,248,0.2)] pointer-events-none flex items-end justify-center pb-1"
+          >
+            <span className="font-pixel text-[9px] text-cyan-300/80 tracking-widest">
+              HUB CORE
+            </span>
+          </div>
 
           {/* 3. Open Doorway Threshold Strips */}
           {DOORWAY_THRESHOLDS.map((door, idx) => (
@@ -684,9 +886,9 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                 width: door.w * STUDIO_TILE_SIZE,
                 height: door.h * STUDIO_TILE_SIZE,
               }}
-              className="absolute bg-amber-400/10 border border-amber-300/25 pointer-events-none flex items-center justify-center"
+              className="absolute bg-amber-400/15 border border-amber-300/35 pointer-events-none flex items-center justify-center"
             >
-              <span className="w-1.5 h-1.5 bg-amber-300/40" />
+              <span className="w-1.5 h-1.5 bg-amber-300/60" />
             </div>
           ))}
 
@@ -699,8 +901,11 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                 top: wall.row * STUDIO_TILE_SIZE,
                 width: wall.w * STUDIO_TILE_SIZE,
                 height: wall.h * STUDIO_TILE_SIZE,
+                backgroundImage:
+                  'linear-gradient(to right, rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(0,0,0,0.35) 2px, transparent 2px)',
+                backgroundSize: '20px 10px',
               }}
-              className="absolute bg-slate-800 border-2 border-slate-600/80 shadow-[inset_0_2px_0_rgba(255,255,255,0.12),inset_0_-3px_0_rgba(0,0,0,0.6)] pointer-events-none"
+              className="absolute bg-[#1b2030] border-2 border-[#090d16] shadow-[inset_0_2px_0_rgba(255,255,255,0.16),inset_0_-3px_0_rgba(0,0,0,0.7)] pointer-events-none"
             />
           ))}
 
@@ -721,30 +926,44 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                 {isLast ? (
                   <span className="w-4 h-4 border-2 border-amber-300 bg-amber-400/25 animate-pulse" />
                 ) : (
-                  <span className="w-1.5 h-1.5 bg-amber-300/55" />
+                  <span className="w-1.5 h-1.5 bg-amber-300/60" />
                 )}
               </div>
             );
           })}
 
-          {/* 6. Custom Themed Room Furniture & Resident NPCs */}
+          {/* 6. Rich Custom Themed Room Furniture & Resident NPCs */}
           {STUDIO_ROOMS.map((room) => (
             <React.Fragment key={`furn-${room.id}`}>
-              {room.decorProps.map((prop) => (
-                <div
-                  key={prop.id}
-                  style={{
-                    left: prop.col * STUDIO_TILE_SIZE,
-                    top: prop.row * STUDIO_TILE_SIZE,
-                    width: (prop.widthTiles || 1) * STUDIO_TILE_SIZE,
-                    height: STUDIO_TILE_SIZE,
-                  }}
-                  title={prop.label}
-                  className="absolute z-10 pointer-events-none"
-                >
-                  <StudioDecorSprite prop={prop} />
-                </div>
-              ))}
+              {room.decorProps
+                .filter((prop) => {
+                  if (!prop.walkable) return true;
+                  const span = prop.widthTiles || 1;
+                  return !placedApps.some(
+                    (p) =>
+                      p.row === prop.row &&
+                      p.col >= prop.col &&
+                      p.col < prop.col + span
+                  );
+                })
+                .map((prop) => (
+                  <div
+                    key={prop.id}
+                    style={{
+                      left: prop.col * STUDIO_TILE_SIZE,
+                      top: prop.row * STUDIO_TILE_SIZE,
+                      width: (prop.widthTiles || 1) * STUDIO_TILE_SIZE,
+                      height:
+                        prop.kind === 'paired-wood-desks'
+                          ? STUDIO_TILE_SIZE * 1.35
+                          : STUDIO_TILE_SIZE,
+                    }}
+                    title={prop.label}
+                    className="absolute z-10 pointer-events-none"
+                  >
+                    <StudioDecorSprite prop={prop} />
+                  </div>
+                ))}
 
               {/* Resident Room NPC */}
               <div
@@ -780,8 +999,8 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                 }}
                 className={`absolute z-20 flex items-center justify-center rounded-md transition-transform hover:scale-105 cursor-pointer ${
                   nearbyCRT?.id === room.id
-                    ? 'bg-amber-400/20 ring-2 ring-amber-300 shadow-[0_0_18px_rgba(251,191,36,0.5)]'
-                    : 'bg-slate-900/75 border border-amber-300/40'
+                    ? 'bg-amber-400/20 ring-2 ring-amber-300 shadow-[0_0_18px_rgba(251,191,36,0.55)]'
+                    : 'bg-slate-900/80 border-2 border-[#090d16]'
                 }`}
               >
                 <PixelCRTMonitorSVG
@@ -789,64 +1008,135 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                     room.id === 'central-lobby' ? 'w-11 h-11' : 'w-8 h-8'
                   }
                 />
-                <span className="absolute -bottom-3.5 left-1/2 -translate-x-1/2 px-1 bg-slate-950/90 text-[10px] font-pixel text-amber-200 whitespace-nowrap border border-amber-400/40 pointer-events-none">
-                  {room.id === 'central-lobby' ? 'RETRO OS (40)' : 'CRT'}
+                <span className="absolute -bottom-3.5 left-1/2 -translate-x-1/2 px-1.5 bg-slate-950/95 text-[10px] font-pixel text-amber-200 whitespace-nowrap border border-amber-400/50 pointer-events-none">
+                  {room.id === 'central-lobby'
+                    ? 'RETRO OS [Espaço]'
+                    : 'CRT'}
                 </span>
               </button>
             </React.Fragment>
           ))}
 
-          {/* 7. Dynamic Interactive App Terminals Inside Themed Rooms */}
+          {/* 7. Dynamic Interactive App Machines (Themed Pixel Art Furniture) */}
           {placedApps.map((placed) => {
             const isNearby = nearbyApp?.app.id === placed.app.id;
             const isTarget = targetAppId === placed.app.id;
+            const distFromPlayer = Math.hypot(
+              playerTile.col - (placed.col + 0.5),
+              playerTile.row - (placed.row + 0.5)
+            );
+            const isWithin3Tiles = distFromPlayer <= 3.0;
             const isMatch = !hasActiveFilter || matchingAppIds.has(placed.app.id);
+            const accentHex =
+              ACCENT_HEX_MAP[placed.app.accentColor] || '#6366f1';
+            const slotNum = formatSlotNumber(placed.app.slotIndex);
 
             return (
               <button
                 key={placed.app.id}
                 type="button"
                 onClick={(e) => handleAppTerminalClick(e, placed)}
+                onContextMenu={(e) => {
+                  if (onContextMenuApp && !placed.isClusterRack) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onContextMenuApp(placed.app, e);
+                  }
+                }}
                 data-testid={`studio-app-${placed.app.id}`}
-                title={`${placed.app.name} (${placed.app.category}) — Clique para ir até o app`}
+                title={
+                  placed.isClusterRack
+                    ? `Servidor Cluster da Sala (+${placed.clusterApps?.length} apps) — Clique para abrir`
+                    : `[#${slotNum}] ${placed.app.name} (${placed.app.category}) — Clique para ir até a máquina`
+                }
                 style={{
                   left: placed.col * STUDIO_TILE_SIZE,
                   top: placed.row * STUDIO_TILE_SIZE,
                   width: STUDIO_TILE_SIZE,
                   height: STUDIO_TILE_SIZE,
                 }}
-                className={`group absolute z-20 rounded-md flex items-center justify-center transition-all cursor-pointer ${getDeskSurfaceClasses(
-                  placed.styleVariant,
-                  isNearby,
-                  isTarget
-                )} ${
+                className={`group absolute z-20 flex items-center justify-center transition-all cursor-pointer ${
                   isMatch
                     ? 'opacity-100 hover:scale-110'
                     : 'opacity-30 grayscale-[40%] hover:opacity-80'
                 }`}
               >
-                <AppLogo
-                  name={placed.app.name}
-                  url={placed.app.url}
-                  accentColor={placed.app.accentColor}
-                  customLogoUrl={placed.app.customLogoUrl}
-                  size="xs"
+                <AppFurnitureStation
+                  app={placed.app}
+                  variant={placed.styleVariant}
+                  isNearby={isNearby}
+                  isTarget={isTarget}
+                  clusterCount={placed.clusterApps?.length}
                 />
 
-                {/* App Name Plate directly beneath terminal */}
-                <span className="absolute -bottom-3.5 left-1/2 -translate-x-1/2 max-w-[74px] truncate px-1 bg-slate-950/95 text-[10px] font-pixel text-slate-100 border border-white/15 pointer-events-none">
-                  {placed.app.name}
+                {/* App Name Plate beneath machine (Shows [#Slot] Nome do App when within 3 tiles) */}
+                <span
+                  style={
+                    isNearby
+                      ? {
+                          borderColor: accentHex,
+                          backgroundColor: '#090d16',
+                          color: '#ffffff',
+                        }
+                      : isWithin3Tiles
+                        ? {
+                            borderColor: `${accentHex}99`,
+                            backgroundColor: '#090d16',
+                          }
+                        : undefined
+                  }
+                  className={`absolute -bottom-4 left-1/2 -translate-x-1/2 truncate px-1.5 py-0.5 bg-slate-950/95 text-[10px] font-pixel text-slate-100 border border-white/20 rounded-xs pointer-events-none shadow ${
+                    isWithin3Tiles ? 'max-w-[126px] z-30' : 'max-w-[88px]'
+                  }`}
+                >
+                  {placed.isClusterRack
+                    ? `Cluster (+${placed.clusterApps?.length})`
+                    : isWithin3Tiles
+                      ? `[#${slotNum}] ${placed.app.name}`
+                      : placed.app.name}
                 </span>
 
-                {/* Active Proximity / Walking Target Indicator */}
+                {/* Proximity / Walking Indicator */}
                 {(isNearby || isTarget) && (
-                  <span className="absolute -top-4 left-1/2 -translate-x-1/2 px-1 bg-amber-400 text-slate-950 font-pixel text-[9px] font-bold whitespace-nowrap pointer-events-none shadow">
-                    {isNearby ? 'ABRIR' : 'INDO...'}
+                  <span
+                    style={{ backgroundColor: accentHex }}
+                    className="absolute -top-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 text-slate-950 font-pixel text-[9px] font-bold whitespace-nowrap pointer-events-none shadow border border-black"
+                  >
+                    {isNearby ? '[Espaço / Clique]' : 'INDO...'}
                   </span>
                 )}
               </button>
             );
           })}
+
+          {/* 7.5. Autonomous Roaming Developer NPCs walking between rooms */}
+          {roamingNPCs.map((npc) => (
+            <div
+              key={npc.id}
+              data-testid={`roaming-npc-${npc.id}`}
+              title={`${npc.name} (${npc.role}) — ${npc.statusText}`}
+              style={{
+                left: npc.x,
+                top: npc.y,
+                transform: 'translate(-50%, -62%)',
+              }}
+              className="absolute z-25 pointer-events-none flex flex-col items-center"
+            >
+              <span className="mb-0.5 px-1 py-0 bg-slate-950/90 border border-white/20 rounded-xs font-pixel text-[8px] text-slate-200 whitespace-nowrap shadow">
+                {npc.name}{' '}
+                <span className="text-amber-300">{npc.statusText}</span>
+              </span>
+              <PixelDeveloperNPCSprite
+                direction={npc.direction}
+                isMoving={npc.isMoving}
+                walkFrame={npc.walkFrame}
+                shirtColor={npc.shirtColor}
+                hairColor={npc.hairColor}
+                pantsColor={npc.pantsColor}
+                accessory={npc.accessory}
+              />
+            </div>
+          ))}
 
           {/* 8. Controllable Indie Dev Player Character */}
           <div
@@ -866,12 +1156,140 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
           </div>
         </div>
 
-        {/* Bottom Floating Proximity Interaction Prompt / Controls Legend */}
+        {/* Top-Right Interactive Mini-Map */}
+        <PixelStudioMiniMap
+          playerX={playerRender.x}
+          playerY={playerRender.y}
+          camX={camX}
+          camY={camY}
+          viewportWidth={viewportSize.width}
+          viewportHeight={viewportSize.height}
+          cameraZoom={cameraZoom}
+          onToggleZoom={() => setIsCloseZoom((prev) => !prev)}
+          currentRoomId={currentRoom.id}
+          placedApps={placedApps}
+          roamingNPCs={roamingNPCs}
+          matchingAppIds={matchingAppIds}
+          hasActiveFilter={hasActiveFilter}
+          isCollapsed={isMiniMapCollapsed}
+          onToggleCollapsed={() => setIsMiniMapCollapsed((prev) => !prev)}
+          onWalkToTile={(col, row) => walkToTile(col, row, null, null)}
+          onTeleportToRoom={handleTeleportToRoom}
+          onWalkToCentralCRT={() => {
+            const lobby = STUDIO_ROOMS[0];
+            walkToTile(
+              lobby.crtInteractTile.col,
+              lobby.crtInteractTile.row,
+              {
+                type: 'crt',
+                roomId: lobby.id,
+                categoryFilter: lobby.categoryFilter,
+              },
+              null
+            );
+          }}
+        />
+
+        {/* Cluster Server Rack Overflow Selector Modal (> 8 apps in room) */}
+        {activeClusterTerminal && activeClusterTerminal.clusterApps && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md"
+            onClick={() => setActiveClusterTerminal(null)}
+          >
+            <div
+              className="w-full max-w-md rounded-xl bg-slate-950 border-2 border-cyan-400/60 shadow-2xl overflow-hidden text-slate-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-4 py-3 bg-cyan-950/60 border-b border-cyan-400/30 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Server className="w-4 h-4 text-cyan-300" />
+                  <span className="font-pixel-title text-[10px] text-cyan-200 uppercase">
+                    Servidor Cluster da Sala ({activeClusterTerminal.clusterApps.length} Apps)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveClusterTerminal(null)}
+                  className="p-1 rounded hover:bg-white/10 text-slate-300"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-3 max-h-[60dvh] overflow-y-auto divide-y divide-white/10">
+                {activeClusterTerminal.clusterApps.map((cApp) => (
+                  <div
+                    key={cApp.id}
+                    className="py-2.5 px-2 flex items-center justify-between gap-2 hover:bg-white/5 rounded-lg"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <AppLogo
+                        name={cApp.name}
+                        url={cApp.url}
+                        accentColor={cApp.accentColor}
+                        customLogoUrl={cApp.customLogoUrl}
+                        size="xs"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white truncate">
+                          [#{formatSlotNumber(cApp.slotIndex)}] {cApp.name}
+                        </p>
+                        <p className="text-[10px] font-mono text-slate-400 truncate">
+                          {cApp.category}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveClusterTerminal(null);
+                          onPrimaryAppClick(cApp);
+                        }}
+                        className="px-2.5 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-pixel-title text-[8px] font-bold"
+                      >
+                        ABRIR
+                      </button>
+                      {onOpenExternal && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveClusterTerminal(null);
+                            onOpenExternal(cApp);
+                          }}
+                          className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-slate-200"
+                          title="Abrir em Nova Aba"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {onEditApp && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveClusterTerminal(null);
+                            onEditApp(cApp);
+                          }}
+                          className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-slate-200"
+                          title="Editar App"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bottom Floating Proximity Interaction Prompt */}
         <div className="pointer-events-none absolute bottom-2.5 left-1/2 -translate-x-1/2 z-30 w-auto max-w-[94%]">
           {nearbyApp ? (
             <button
               type="button"
-              onClick={() => onPrimaryAppClick(nearbyApp.app)}
+              onClick={() => openPlacedTerminal(nearbyApp)}
               data-testid="studio-proximity-open-app"
               className="pointer-events-auto min-h-[44px] px-4 py-2 rounded-xl bg-slate-950/95 hover:bg-indigo-950 border-2 border-amber-400 text-white shadow-2xl flex items-center gap-2.5 transition-all cursor-pointer"
             >
@@ -882,8 +1300,10 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
                 customLogoUrl={nearbyApp.app.customLogoUrl}
                 size="xs"
               />
-              <span className="font-pixel text-sm sm:text-base text-amber-200 truncate max-w-[180px] sm:max-w-xs">
-                {nearbyApp.app.name}
+              <span className="font-pixel text-sm sm:text-base text-amber-200 truncate max-w-[200px] sm:max-w-xs">
+                {nearbyApp.isClusterRack
+                  ? `Servidor Cluster (+${nearbyApp.clusterApps?.length} Apps)`
+                  : `[#${formatSlotNumber(nearbyApp.app.slotIndex)}] ${nearbyApp.app.name}`}
               </span>
               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-400 text-slate-950 font-pixel-title text-[9px] font-bold">
                 <span>ABRIR</span>
@@ -910,7 +1330,7 @@ export const PixelStudioView: React.FC<PixelStudioViewProps> = ({
             </button>
           ) : (
             <div className="px-3.5 py-1.5 rounded-xl bg-slate-950/85 border border-white/10 text-xs text-slate-300 font-pixel whitespace-nowrap truncate shadow-lg">
-              WASD / Setas ou clique no chão, sala ou app para caminhar
+              WASD / Setas ou clique no chão, sala ou máquina para caminhar
             </div>
           )}
         </div>

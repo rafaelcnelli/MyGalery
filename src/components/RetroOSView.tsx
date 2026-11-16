@@ -1,31 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Search,
-  Edit2,
-  ExternalLink,
   Plus,
-  RotateCw,
+  ExternalLink,
+  RefreshCw,
+  Edit2,
+  Trash2,
   Monitor,
-  Tablet,
-  Smartphone,
-  Cloud,
-  HardDrive,
+  Gamepad2,
+  Zap,
+  Sparkles,
   FolderOpen,
-  ArrowLeft,
-  SlidersHorizontal,
-  Move,
-  X,
+  Info,
 } from 'lucide-react';
+import { WebAppItem, GridDensity } from '../types/launcher';
 import {
-  APP_CATEGORIES,
-  GridColumnsPerRow,
-  GridScale,
-  SyncStatus,
-  WebAppItem,
-} from '../types/launcher';
-import {
-  computeSinglePageGridMetrics,
+  buildFixedSlotArray,
   extractHostname,
+  formatSlotNumber,
 } from '../utils/launcherLogic';
 import { AppLogo } from './AppLogo';
 
@@ -33,1051 +24,679 @@ interface RetroOSViewProps {
   apps: WebAppItem[];
   matchingAppIds: Set<string>;
   hasActiveFilter: boolean;
-  searchQuery: string;
-  onSearchChange: (q: string) => void;
-  selectedCategory: string;
-  onCategoryChange: (cat: string) => void;
-  isOrganizeMode: boolean;
-  onToggleOrganizeMode: () => void;
-  gridColumns: GridColumnsPerRow;
-  onChangeGridColumns: (cols: GridColumnsPerRow) => void;
-  gridScale: GridScale;
-  syncStatus: SyncStatus;
-  onOpenEditModal: (app: WebAppItem) => void;
-  onOpenNewAppAtSlot: (slotIndex: number) => void;
-  onOpenNewAppModal: () => void;
-  onOpenCloudModal: () => void;
-  onMoveOrSwapSlot: (appId: string, targetSlotIndex: number) => void;
+  density: GridDensity;
+  isEditMode: boolean;
+  activeRoomCategoryFilter?: string;
+  onClearRoomFilter?: () => void;
   onBackToPixelStudio: () => void;
+  onSelectApp: (app: WebAppItem, e?: React.MouseEvent) => void;
+  onOpenExternal: (app: WebAppItem) => void;
+  onTransferToModernPreview: (app: WebAppItem) => void;
+  onContextMenuApp?: (app: WebAppItem, e: React.MouseEvent) => void;
+  onEditApp: (app: WebAppItem) => void;
+  onDeleteApp: (id: string) => void;
+  onAddAtSlot: (slotIndex: number) => void;
+  onSwapSlots: (sourceSlot: number, targetSlot: number) => void;
 }
 
-type RetroViewportPreset = 'desktop' | 'tablet' | 'mobile';
+interface RetroWindowInstance {
+  id: string;
+  app: WebAppItem;
+  kind: 'browser' | 'properties';
+  minimized: boolean;
+  maximized: boolean;
+  reloadKey: number;
+}
 
-/**
- * Pixelated Windows 95 Shortcut Overlay Badge (Bottom-Left White Square with Curved Pixel Arrow)
- */
-const Win95ShortcutBadge: React.FC = () => (
-  <span
-    aria-hidden="true"
-    className="absolute -bottom-0.5 -left-0.5 z-20 w-3.5 h-3.5 bg-white border border-black flex items-center justify-center shadow-none pointer-events-none"
-  >
-    <svg
-      viewBox="0 0 9 9"
-      shapeRendering="crispEdges"
-      className="w-2.5 h-2.5 pixelated"
-    >
-      <rect x="1" y="5" width="2" height="2" fill="#000000" />
-      <rect x="2" y="4" width="2" height="1" fill="#000000" />
-      <rect x="3" y="3" width="3" height="1" fill="#000000" />
-      <rect x="5" y="1" width="2" height="4" fill="#000000" />
-      <rect x="4" y="2" width="3" height="1" fill="#000000" />
-    </svg>
-  </span>
-);
-
-/**
- * Pixelated Windows 95 4-Color Flag Logo for [Iniciar] Button
- */
-const Win95FlagSVG: React.FC = () => (
-  <svg
-    viewBox="0 0 12 12"
-    shapeRendering="crispEdges"
-    className="w-3.5 h-3.5 pixelated shrink-0"
-    aria-hidden="true"
-  >
-    <rect x="1" y="1" width="4" height="4" fill="#ef4444" />
-    <rect x="6" y="1" width="5" height="4" fill="#22c55e" />
-    <rect x="1" y="6" width="4" height="5" fill="#3b82f6" />
-    <rect x="6" y="6" width="5" height="5" fill="#eab308" />
-  </svg>
-);
+const MAX_RETRO_WINDOWS = 3;
 
 export const RetroOSView: React.FC<RetroOSViewProps> = ({
   apps,
   matchingAppIds,
   hasActiveFilter,
-  searchQuery,
-  onSearchChange,
-  selectedCategory,
-  onCategoryChange,
-  isOrganizeMode,
-  onToggleOrganizeMode,
-  gridColumns,
-  onChangeGridColumns,
-  gridScale,
-  syncStatus,
-  onOpenEditModal,
-  onOpenNewAppAtSlot,
-  onOpenNewAppModal,
-  onOpenCloudModal,
-  onMoveOrSwapSlot,
+  density,
+  isEditMode,
+  activeRoomCategoryFilter,
+  onClearRoomFilter,
   onBackToPixelStudio,
+  onOpenExternal,
+  onTransferToModernPreview,
+  onContextMenuApp,
+  onEditApp,
+  onDeleteApp,
+  onAddAtSlot,
+  onSwapSlots,
 }) => {
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
-  const [propertiesApp, setPropertiesApp] = useState<WebAppItem | null>(null);
-  const [retroBrowserApp, setRetroBrowserApp] = useState<WebAppItem | null>(
+  const slots = useMemo(() => buildFixedSlotArray(apps), [apps]);
+
+  const [windows, setWindows] = useState<RetroWindowInstance[]>([]);
+  const [focusedWindowId, setFocusedWindowId] = useState<string | null>(null);
+  const [isStartMenuOpen, setIsStartMenuOpen] = useState(false);
+  const [crtScanlines, setCrtScanlines] = useState(true);
+  const [selectedDesktopSlot, setSelectedDesktopSlot] = useState<number | null>(
     null
   );
-  const [browserViewport, setBrowserViewport] =
-    useState<RetroViewportPreset>('desktop');
-  const [iframeKey, setIframeKey] = useState(0);
-
-  const [isStartMenuOpen, setIsStartMenuOpen] = useState(false);
-  const [showCrtBezel, setShowCrtBezel] = useState(true);
-  const [retroDarkBg, setRetroDarkBg] = useState(false);
-
-  // Drag & Drop / Touch Move state for the 40 Slots
-  const [draggedAppId, setDraggedAppId] = useState<string | null>(null);
-  const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
-  const [selectedForMoveAppId, setSelectedForMoveAppId] = useState<
-    string | null
-  >(null);
-  const [isNarrowScreen, setIsNarrowScreen] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth < 640 : false
-  );
-  const [now, setNow] = useState(() => new Date());
-
-  const startMenuRef = useRef<HTMLDivElement>(null);
+  const [draggedSlot, setDraggedSlot] = useState<number | null>(null);
+  const [clockText, setClockText] = useState('');
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 15000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const onResize = () => {
-      setIsNarrowScreen(window.innerWidth < 640);
+    const updateClock = () => {
+      const d = new Date();
+      setClockText(
+        d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      );
     };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    updateClock();
+    const id = window.setInterval(updateClock, 10000);
+    return () => window.clearInterval(id);
   }, []);
 
-  // Close Start Menu on outside click
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (
-        startMenuRef.current &&
-        !startMenuRef.current.contains(e.target as Node)
-      ) {
-        setIsStartMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  const roomFilteredCategories = useMemo(() => {
+    if (!activeRoomCategoryFilter) return null;
+    return new Set(
+      activeRoomCategoryFilter
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    );
+  }, [activeRoomCategoryFilter]);
 
-  // Keep propertiesApp synced if edited or deleted
-  const activePropertiesApp = propertiesApp
-    ? apps.find((a) => a.id === propertiesApp.id) || null
-    : null;
-
-  const activeBrowserApp = retroBrowserApp
-    ? apps.find((a) => a.id === retroBrowserApp.id) || null
-    : null;
-
-  // Build O(1) slot lookup map for the 40 slots
-  const slotMap = new Map<number, WebAppItem>();
-  for (const app of apps) {
-    slotMap.set(app.slotIndex, app);
-  }
-
-  const effectiveCols = (
-    isNarrowScreen && gridColumns > 4 ? 4 : gridColumns
-  ) as GridColumnsPerRow;
-
-  const { columns, rows, visibleSlotCount } = computeSinglePageGridMetrics(
-    effectiveCols,
-    apps
-  );
-
-  const isDraggingAny = draggedAppId !== null || selectedForMoveAppId !== null;
-  const showEmptySlotGuides = isOrganizeMode || isDraggingAny;
-
-  const logoSize: 'xs' | 'sm' | 'md' =
-    gridScale === 'xs' || rows > 6 || (isNarrowScreen && effectiveCols >= 4)
-      ? 'xs'
-      : gridScale === 'compact' || rows >= 5
-        ? 'sm'
-        : 'md';
-
-  const handleDragStart = (
-    e: React.DragEvent<HTMLDivElement>,
-    app: WebAppItem
+  const openRetroWindow = (
+    app: WebAppItem,
+    kind: 'browser' | 'properties'
   ) => {
-    setDraggedAppId(app.id);
-    e.dataTransfer.setData('text/plain', app.id);
-    e.dataTransfer.effectAllowed = 'move';
-  };
-
-  const handleDragEnd = () => {
-    setDraggedAppId(null);
-    setDragOverSlot(null);
-  };
-
-  const handleDragOver = (
-    e: React.DragEvent<HTMLDivElement>,
-    slotIndex: number
-  ) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (dragOverSlot !== slotIndex) {
-      setDragOverSlot(slotIndex);
-    }
-  };
-
-  const handleDrop = (
-    e: React.DragEvent<HTMLDivElement>,
-    targetSlotIndex: number
-  ) => {
-    e.preventDefault();
-    const sourceAppId =
-      draggedAppId || e.dataTransfer.getData('text/plain');
-    setDraggedAppId(null);
-    setDragOverSlot(null);
-
-    if (sourceAppId) {
-      onMoveOrSwapSlot(sourceAppId, targetSlotIndex);
-    }
-  };
-
-  const handleSlotActionInOrganize = (
-    slotIndex: number,
-    occupant: WebAppItem | undefined
-  ) => {
-    if (selectedForMoveAppId) {
-      if (selectedForMoveAppId !== occupant?.id) {
-        onMoveOrSwapSlot(selectedForMoveAppId, slotIndex);
-      }
-      setSelectedForMoveAppId(null);
+    setIsStartMenuOpen(false);
+    if (kind === 'browser' && app.openExternalOnly) {
+      onOpenExternal(app);
       return;
     }
 
-    if (occupant) {
-      setSelectedForMoveAppId(occupant.id);
-    } else {
-      onOpenNewAppAtSlot(slotIndex);
-    }
+    setWindows((prev) => {
+      const existing = prev.find((w) => w.app.id === app.id && w.kind === kind);
+      if (existing) {
+        setFocusedWindowId(existing.id);
+        return prev.map((w) =>
+          w.id === existing.id ? { ...w, minimized: false } : w
+        );
+      }
+
+      const newWin: RetroWindowInstance = {
+        id: `${app.id}-${kind}-${Date.now()}`,
+        app,
+        kind,
+        minimized: false,
+        maximized: kind === 'browser',
+        reloadKey: 0,
+      };
+
+      const trimmed =
+        prev.length >= MAX_RETRO_WINDOWS ? prev.slice(1) : prev;
+      setFocusedWindowId(newWin.id);
+      return [...trimmed, newWin];
+    });
   };
 
-  const timeString = now.toLocaleTimeString('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const closeRetroWindow = (winId: string) => {
+    setWindows((prev) => {
+      const next = prev.filter((w) => w.id !== winId);
+      if (focusedWindowId === winId) {
+        const lastVisible = [...next].reverse().find((w) => !w.minimized);
+        setFocusedWindowId(lastVisible ? lastVisible.id : null);
+      }
+      return next;
+    });
+  };
+
+  const toggleMinimizeWindow = (winId: string) => {
+    setWindows((prev) =>
+      prev.map((w) => {
+        if (w.id !== winId) return w;
+        const nextMin = !w.minimized;
+        if (!nextMin) setFocusedWindowId(winId);
+        return { ...w, minimized: nextMin };
+      })
+    );
+  };
+
+  const toggleMaximizeWindow = (winId: string) => {
+    setWindows((prev) =>
+      prev.map((w) => (w.id === winId ? { ...w, maximized: !w.maximized } : w))
+    );
+  };
+
+  const reloadBrowserWindow = (winId: string) => {
+    setWindows((prev) =>
+      prev.map((w) =>
+        w.id === winId ? { ...w, reloadKey: w.reloadKey + 1 } : w
+      )
+    );
+  };
+
+  const activeWindow = useMemo(() => {
+    const visible = windows.filter((w) => !w.minimized);
+    if (visible.length === 0) return null;
+    return (
+      visible.find((w) => w.id === focusedWindowId) ||
+      visible[visible.length - 1]
+    );
+  }, [windows, focusedWindowId]);
+
+  const gapClass =
+    density === 'compact'
+      ? 'gap-1.5 p-2'
+      : density === 'expanded'
+        ? 'gap-3 p-4'
+        : 'gap-2 p-3';
 
   return (
-    <main
-      data-testid="retro-os-view"
-      aria-label="Tela de Computador Antigo Retro OS Windows 95"
-      className="relative z-10 flex-1 w-full h-full min-h-0 overflow-hidden p-0 sm:px-4 sm:pb-2.5 sm:pt-1 flex flex-col items-center justify-center select-none"
+    <div
+      className="relative w-full h-full overflow-hidden flex items-center justify-center p-1.5 sm:p-3 select-none"
+      onClick={() => {
+        setIsStartMenuOpen(false);
+        setSelectedDesktopSlot(null);
+      }}
     >
-      {/* Outer Beige CRT Monitor Frame on Desktop (100% Full Screen on Mobile) */}
-      <div
-        className={`relative w-full h-full max-w-[1600px] flex flex-col overflow-hidden transition-all ${
-          showCrtBezel && !isNarrowScreen
-            ? 'sm:p-3.5 sm:rounded-[28px] sm:bg-[#d8d2c5] sm:border-4 sm:border-[#b5ae9e] sm:shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_2px_2px_0px_#ffffff,inset_-3px_-3px_0px_#8c8577]'
-            : ''
-        }`}
-      >
-        {/* Inner CRT Screen Glass with Scanlines */}
-        <div
-          onClick={() => setSelectedAppId(null)}
-          className={`relative flex-1 w-full min-h-0 flex flex-col overflow-hidden ${
-            showCrtBezel && !isNarrowScreen
-              ? 'sm:rounded-2xl sm:border-4 sm:border-[#524e46] shadow-inner'
-              : ''
-          } ${retroDarkBg ? 'bg-[#0b2b2e]' : 'bg-[#008080]'}`}
-        >
-          {/* Subtle CRT Scanlines Overlay (pointer-events-none so clicks never block) */}
-          <div className="crt-scanlines absolute inset-0 z-30" />
-
-          {/* Top Active Category / Organize Banner inside Win95 Desktop */}
-          {(selectedCategory !== 'ALL' ||
-            isOrganizeMode ||
-            selectedForMoveAppId) && (
+      {/* Physical Beige 90s CRT Monitor Bezel */}
+      <div className="relative w-full h-full max-w-[1600px] rounded-2xl bg-[#d6d2c4] p-2 sm:p-3.5 border-4 border-[#f2efe4] shadow-[inset_-4px_-4px_0_#8e8a7e,0_20px_50px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden">
+        {/* Inner CRT Screen Glass */}
+        <div className="relative flex-1 w-full h-full rounded-lg bg-[#008080] border-4 border-[#4a4842] overflow-hidden flex flex-col">
+          {/* Optional CRT Scanlines Overlay */}
+          {crtScanlines && (
             <div
-              onClick={(e) => e.stopPropagation()}
-              className="relative z-20 m-1.5 px-2.5 py-1 win95-outset flex flex-wrap items-center justify-between gap-2 text-xs font-pixel shrink-0"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <FolderOpen className="w-3.5 h-3.5 text-[#000080] shrink-0" />
-                <span className="truncate font-bold text-black">
-                  {selectedForMoveAppId
-                    ? 'MODO MOVER: Clique em outro slot para trocar de posição (Auto-Swap).'
-                    : isOrganizeMode
-                      ? 'MODO ORGANIZAR WIN95: Arraste atalhos ou clique em um slot vazio (+) para criar.'
-                      : `FILTRO DE ESTAÇÃO ATIVO: [${selectedCategory}]`}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                {selectedCategory !== 'ALL' && (
-                  <button
-                    type="button"
-                    onClick={() => onCategoryChange('ALL')}
-                    className="win95-btn px-2 py-0.5 font-pixel text-xs font-bold cursor-pointer"
-                  >
-                    [Mostrar Todos os 40 Slots]
-                  </button>
-                )}
-                {selectedForMoveAppId && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedForMoveAppId(null)}
-                    className="win95-btn px-2 py-0.5 font-pixel text-xs font-bold cursor-pointer"
-                  >
-                    [Cancelar]
-                  </button>
-                )}
-              </div>
-            </div>
+              aria-hidden="true"
+              style={{
+                backgroundImage:
+                  'linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.22) 50%)',
+                backgroundSize: '100% 4px',
+              }}
+              className="pointer-events-none absolute inset-0 z-40"
+            />
           )}
 
-          {/* WIN95 DESKTOP WORKSPACE: THE 40 SLOTS MATRIX */}
-          <div
-            data-testid="retro-desktop-grid"
-            style={{
-              gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-              gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-            }}
-            className="relative z-10 flex-1 w-full min-h-0 overflow-hidden grid gap-1 sm:gap-2 p-2 sm:p-3"
-          >
-            {Array.from({ length: visibleSlotCount }, (_, slotIndex) => {
-              const occupant = slotMap.get(slotIndex);
-              const isDropTarget = dragOverSlot === slotIndex;
-              const isBeingDragged = occupant && draggedAppId === occupant.id;
-              const isSelectedForMove =
-                occupant && selectedForMoveAppId === occupant.id;
-              const isSelected =
-                occupant &&
-                (selectedAppId === occupant.id ||
-                  activePropertiesApp?.id === occupant.id);
-              const isMatched = occupant
-                ? matchingAppIds.has(occupant.id)
-                : false;
-              const isDimmed = hasActiveFilter && occupant && !isMatched;
-
-              return (
-                <div
-                  key={slotIndex}
-                  data-slot-index={slotIndex}
-                  onDragOver={(e) => handleDragOver(e, slotIndex)}
-                  onDragLeave={() => {
-                    if (dragOverSlot === slotIndex) setDragOverSlot(null);
-                  }}
-                  onDrop={(e) => handleDrop(e, slotIndex)}
-                  className={`relative group/slot min-h-0 min-w-0 flex items-center justify-center p-0.5 transition-none ${
-                    isDropTarget
-                      ? 'border-2 border-dashed border-yellow-300 bg-[#000080]/40'
-                      : isSelectedForMove
-                        ? 'border-2 border-dotted border-yellow-300 bg-yellow-400/20'
-                        : showEmptySlotGuides && !occupant
-                          ? 'border border-dotted border-white/40 bg-black/15 hover:bg-white/10'
-                          : 'border border-transparent hover:border-dotted hover:border-white/30'
-                  }`}
-                >
-                  {occupant ? (
-                    <div
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, occupant)}
-                      onDragEnd={handleDragEnd}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (isOrganizeMode || selectedForMoveAppId) {
-                          handleSlotActionInOrganize(slotIndex, occupant);
-                        } else {
-                          setSelectedAppId(occupant.id);
-                          setPropertiesApp(occupant);
-                        }
-                      }}
-                      data-testid={`retro-app-card-${occupant.id}`}
-                      className={`group relative w-full h-full min-h-0 flex flex-col items-center justify-center gap-1 p-1 cursor-pointer ${
-                        isBeingDragged ? 'opacity-40' : 'opacity-100'
-                      } ${
-                        isDimmed
-                          ? 'opacity-25 grayscale pointer-events-none'
-                          : ''
-                      }`}
-                    >
-                      {/* Slot Index Coordinate in Organize Mode */}
-                      {showEmptySlotGuides && (
-                        <span className="absolute top-0.5 left-1 font-pixel text-[10px] text-yellow-200 bg-black/60 px-1">
-                          #{String(slotIndex).padStart(2, '0')}
-                        </span>
-                      )}
-
-                      {/* Retro Icon Container with Classic Win95 Shortcut Arrow */}
-                      <div
-                        className={`relative pixelated ${
-                          isSelected
-                            ? 'ring-1 ring-dotted ring-yellow-200 brightness-95'
-                            : ''
-                        }`}
-                      >
-                        <AppLogo
-                          name={occupant.name}
-                          url={occupant.url}
-                          accentColor={occupant.accentColor}
-                          customLogoUrl={occupant.customLogoUrl}
-                          size={logoSize}
-                        />
-                        <Win95ShortcutBadge />
-                      </div>
-
-                      {/* Classic Windows 95 Icon Label (Navy #000080 highlight when selected) */}
-                      <div className="w-full text-center px-0.5 min-w-0">
-                        <span
-                          className={`inline-block max-w-full truncate px-1 py-0.5 font-pixel text-xs sm:text-sm leading-none ${
-                            isSelected
-                              ? 'bg-[#000080] text-white border border-dotted border-yellow-200'
-                              : 'text-white drop-shadow-[1px_1px_0px_rgba(0,0,0,0.95)] group-hover:bg-[#000080]/80'
-                          }`}
-                        >
-                          {occupant.name}
-                        </span>
-                      </div>
-                    </div>
-                  ) : (
-                    /* Empty Win95 Desktop Slot */
+          {/* Top Retro Info Strip */}
+          <div className="h-7 px-2.5 bg-[#c0c0c0] border-b-2 border-[#404040] flex items-center justify-between text-[11px] font-mono text-black shrink-0 z-20">
+            <div className="flex items-center gap-2 truncate">
+              <Monitor className="w-3.5 h-3.5 text-teal-800 shrink-0" />
+              <span className="font-bold">RETRO_OS v4.0 // 40-SLOTS</span>
+              {activeRoomCategoryFilter && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 bg-amber-200 border border-black text-[10px]">
+                  Sala: {activeRoomCategoryFilter}
+                  {onClearRoomFilter && (
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleSlotActionInOrganize(slotIndex, undefined);
+                        onClearRoomFilter();
                       }}
-                      aria-label={`Adicionar atalho no slot ${slotIndex}`}
-                      title={`Slot #${String(slotIndex).padStart(
-                        2,
-                        '0'
-                      )} livre — Clique para criar atalho`}
-                      className={`w-full h-full min-h-0 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
-                        showEmptySlotGuides
-                          ? 'opacity-100'
-                          : 'opacity-0 group-hover/slot:opacity-100'
-                      }`}
+                      className="ml-1 font-bold hover:text-red-700"
                     >
-                      <div className="w-6 h-6 win95-outset flex items-center justify-center text-black">
-                        <Plus className="w-3.5 h-3.5" />
-                      </div>
-                      <span className="font-pixel text-[11px] text-white bg-black/60 px-1">
-                        #{String(slotIndex).padStart(2, '0')}
-                      </span>
+                      ×
                     </button>
                   )}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setCrtScanlines((prev) => !prev);
+                }}
+                className="px-2 py-0.5 bg-[#dfdfdf] border border-black text-[10px] font-bold hover:bg-white cursor-pointer"
+                title="Alternar efeito Scanlines CRT"
+              >
+                CRT: {crtScanlines ? 'ON' : 'OFF'}
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onBackToPixelStudio();
+                }}
+                className="px-2 py-0.5 bg-[#000080] text-white border border-black text-[10px] font-bold hover:bg-blue-800 flex items-center gap-1 cursor-pointer"
+              >
+                <Gamepad2 className="w-3 h-3" />
+                <span>Estúdio Pixel</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Desktop 8x5 Matrix of 40 Win95/98 Slots */}
+          <div
+            className={`relative flex-1 grid grid-cols-5 sm:grid-cols-8 sm:grid-rows-5 w-full h-full overflow-hidden ${gapClass}`}
+          >
+            {slots.map((app, slotIdx) => {
+              const slotNum = formatSlotNumber(slotIdx);
+              const isMatchedFilter = app ? matchingAppIds.has(app.id) : false;
+              const isMatchedRoom =
+                !roomFilteredCategories ||
+                (app && roomFilteredCategories.has(app.category));
+              const isDimmed =
+                (hasActiveFilter && (!app || !isMatchedFilter)) ||
+                (roomFilteredCategories && (!app || !isMatchedRoom));
+              const isSelected = selectedDesktopSlot === slotIdx;
+
+              if (!app) {
+                return (
+                  <button
+                    key={`retro-empty-${slotIdx}`}
+                    type="button"
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (draggedSlot !== null && draggedSlot !== slotIdx) {
+                        onSwapSlots(draggedSlot, slotIdx);
+                      }
+                      setDraggedSlot(null);
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAddAtSlot(slotIdx);
+                    }}
+                    className={`group relative rounded border border-dashed border-white/25 hover:border-white/70 hover:bg-white/10 flex flex-col items-center justify-center p-1 transition-opacity ${
+                      isDimmed ? 'opacity-20' : 'opacity-80'
+                    }`}
+                    title={`Slot #${slotNum} livre — Clique para instalar novo Web App`}
+                  >
+                    <span className="absolute top-0.5 left-1 text-[9px] font-mono text-white/70">
+                      #{slotNum}
+                    </span>
+                    <Plus className="w-3.5 h-3.5 text-white/70" />
+                  </button>
+                );
+              }
+
+              return (
+                <div
+                  key={app.id}
+                  draggable
+                  onDragStart={() => setDraggedSlot(slotIdx)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (draggedSlot !== null && draggedSlot !== slotIdx) {
+                      onSwapSlots(draggedSlot, slotIdx);
+                    }
+                    setDraggedSlot(null);
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedDesktopSlot(slotIdx);
+                    if (isEditMode) {
+                      onEditApp(app);
+                    } else if (e.metaKey || e.ctrlKey) {
+                      onOpenExternal(app);
+                    } else {
+                      openRetroWindow(app, 'properties');
+                    }
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    openRetroWindow(app, 'browser');
+                  }}
+                  onAuxClick={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onOpenExternal(app);
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    if (onContextMenuApp) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onContextMenuApp(app, e);
+                    }
+                  }}
+                  className={`group relative rounded flex flex-col items-center justify-center p-1 cursor-pointer transition-all ${
+                    isSelected
+                      ? 'bg-[#000080]/80 ring-1 ring-dotted ring-yellow-200'
+                      : 'hover:bg-white/15'
+                  } ${isDimmed ? 'opacity-20 grayscale' : ''}`}
+                  title={`${app.name} (#${slotNum}) — Clique: Propriedades | Duplo Clique: Navegador Retro`}
+                >
+                  <span className="absolute top-0.5 left-1 text-[9px] font-mono text-white/90 drop-shadow">
+                    #{slotNum}
+                  </span>
+
+                  {app.openExternalOnly && (
+                    <span className="absolute top-0.5 right-1 px-1 bg-amber-300 text-black font-mono text-[8px] font-bold border border-black">
+                      ↗
+                    </span>
+                  )}
+
+                  <div className="scale-90">
+                    <AppLogo
+                      name={app.name}
+                      url={app.url}
+                      accentColor={app.accentColor}
+                      customLogoUrl={app.customLogoUrl}
+                      size="xs"
+                    />
+                  </div>
+
+                  <span
+                    className={`mt-1 px-1 text-[10px] font-mono leading-tight truncate max-w-[96%] ${
+                      isSelected
+                        ? 'bg-[#000080] text-white'
+                        : 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]'
+                    }`}
+                  >
+                    {app.name}
+                  </span>
                 </div>
               );
             })}
           </div>
 
-          {/* ===================================================================== */}
-          {/* 2. SPOTLIGHT RETRÔ: JANELA DE PROPRIEDADES DO WINDOWS 95              */}
-          {/* ===================================================================== */}
-          {activePropertiesApp && (
+          {/* Active Retro OS Window (Properties or Retro Browser) */}
+          {activeWindow && (
             <div
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="win95-props-title"
-              onClick={() => setPropertiesApp(null)}
-              className="absolute inset-0 z-30 flex items-center justify-center bg-black/45 p-3"
+              onClick={(e) => e.stopPropagation()}
+              className={`absolute z-30 bg-[#c0c0c0] border-2 border-t-white border-l-white border-r-black border-b-black shadow-2xl flex flex-col text-black font-mono ${
+                activeWindow.maximized
+                  ? 'inset-2 bottom-10'
+                  : 'w-[92%] max-w-xl top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2'
+              }`}
             >
-              <div
-                onClick={(e) => e.stopPropagation()}
-                data-testid="win95-properties-modal"
-                className="w-full max-w-md win95-window p-1.5 flex flex-col gap-2"
-              >
-                {/* Classic Navy Blue Title Bar */}
-                <div className="win95-titlebar px-2 py-1 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <Win95FlagSVG />
-                    <span
-                      id="win95-props-title"
-                      className="font-pixel-title text-[9px] sm:text-[10px] text-white truncate"
-                    >
-                      Propriedades de {activePropertiesApp.name}.lnk
-                    </span>
-                  </div>
+              {/* Win95 Title Bar */}
+              <div className="h-7 px-2 bg-gradient-to-r from-[#000080] to-[#1084d0] text-white flex items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {activeWindow.kind === 'browser' ? (
+                    <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <Info className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span className="text-xs font-bold truncate">
+                    [#{formatSlotNumber(activeWindow.app.slotIndex)}]{' '}
+                    {activeWindow.app.name} —{' '}
+                    {activeWindow.kind === 'browser'
+                      ? 'Retro Navigator'
+                      : 'Propriedades do Sistema'}
+                  </span>
+                </div>
+
+                {/* Window Title Bar Controls + [⚡ Modo Moderno] Transfer Button */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetApp = activeWindow.app;
+                      closeRetroWindow(activeWindow.id);
+                      onTransferToModernPreview(targetApp);
+                    }}
+                    className="px-2 py-0.5 bg-amber-300 hover:bg-amber-200 text-black border border-black text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                    title="Transferir este App para a janela moderna Live Preview"
+                  >
+                    <Zap className="w-3 h-3 fill-black" />
+                    <span>⚡ Modo Moderno</span>
+                  </button>
 
                   <button
                     type="button"
-                    onClick={() => setPropertiesApp(null)}
-                    aria-label="Fechar janela de propriedades"
-                    className="win95-btn w-5 h-5 flex items-center justify-center font-mono text-xs font-bold text-black cursor-pointer shrink-0"
+                    onClick={() => toggleMinimizeWindow(activeWindow.id)}
+                    className="w-5 h-5 bg-[#c0c0c0] text-black border border-t-white border-l-white border-r-black border-b-black text-xs font-bold flex items-center justify-center"
+                    title="Minimizar para a Barra de Tarefas"
                   >
-                    X
+                    _
+                  </button>
+                  {activeWindow.kind === 'browser' && (
+                    <button
+                      type="button"
+                      onClick={() => toggleMaximizeWindow(activeWindow.id)}
+                      className="w-5 h-5 bg-[#c0c0c0] text-black border border-t-white border-l-white border-r-black border-b-black text-xs font-bold flex items-center justify-center"
+                      title="Maximizar / Restaurar"
+                    >
+                      □
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => closeRetroWindow(activeWindow.id)}
+                    className="w-5 h-5 bg-[#c0c0c0] hover:bg-red-600 hover:text-white text-black border border-t-white border-l-white border-r-black border-b-black text-xs font-bold flex items-center justify-center"
+                    title="Fechar Janela"
+                  >
+                    ×
                   </button>
                 </div>
+              </div>
 
-                {/* Inner Tabbed-Style Properties Sheet */}
-                <div className="win95-outset p-3 space-y-3">
-                  {/* Top Row: App Icon + Metadata + Quick Edit Button */}
-                  <div className="flex items-start justify-between gap-3 pb-2.5 border-b border-[#808080]">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="relative p-1 win95-inset bg-white shrink-0">
-                        <AppLogo
-                          name={activePropertiesApp.name}
-                          url={activePropertiesApp.url}
-                          accentColor={activePropertiesApp.accentColor}
-                          customLogoUrl={activePropertiesApp.customLogoUrl}
-                          size="md"
-                        />
-                        <Win95ShortcutBadge />
-                      </div>
-
-                      <div className="min-w-0">
-                        <h3 className="font-pixel-title text-xs text-black truncate">
-                          {activePropertiesApp.name}
-                        </h3>
-                        <p className="font-pixel text-sm text-[#000080] font-bold">
-                          Categoria: {activePropertiesApp.category} · Slot #
-                          {String(activePropertiesApp.slotIndex).padStart(
-                            2,
-                            '0'
-                          )}
-                        </p>
-                        <p className="font-mono text-[11px] text-neutral-700 truncate">
-                          {extractHostname(activePropertiesApp.url)}
-                        </p>
-                      </div>
+              {/* Window Content */}
+              {activeWindow.kind === 'properties' ? (
+                <div className="p-4 space-y-4 text-xs">
+                  <div className="flex items-center gap-3 p-3 bg-white border-2 border-t-black border-l-black border-r-white border-b-white">
+                    <AppLogo
+                      name={activeWindow.app.name}
+                      url={activeWindow.app.url}
+                      accentColor={activeWindow.app.accentColor}
+                      customLogoUrl={activeWindow.app.customLogoUrl}
+                      size="md"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-sm truncate">
+                        {activeWindow.app.name}
+                      </p>
+                      <p className="text-[11px] text-neutral-600">
+                        Slot #{formatSlotNumber(activeWindow.app.slotIndex)} •{' '}
+                        {activeWindow.app.category}
+                      </p>
+                      <p className="text-[11px] text-blue-800 truncate mt-0.5">
+                        {activeWindow.app.url}
+                      </p>
                     </div>
+                  </div>
 
-                    {/* Beveled Edit Button with Pencil Icon */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openRetroWindow(activeWindow.app, 'browser')
+                      }
+                      className="py-2 px-2 bg-[#dfdfdf] hover:bg-white border-2 border-t-white border-l-white border-r-black border-b-black font-bold flex items-center justify-center gap-1"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      <span>Executar CRT</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenExternal(activeWindow.app)}
+                      className="py-2 px-2 bg-[#dfdfdf] hover:bg-white border-2 border-t-white border-l-white border-r-black border-b-black font-bold flex items-center justify-center gap-1"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Nova Aba ↗</span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => {
-                        const target = activePropertiesApp;
-                        setPropertiesApp(null);
-                        onOpenEditModal(target);
+                        const target = activeWindow.app;
+                        closeRetroWindow(activeWindow.id);
+                        onEditApp(target);
                       }}
-                      data-testid="win95-edit-button"
-                      aria-label={`Editar ${activePropertiesApp.name}`}
-                      title="Editar nome, URL, ícone, cor, slot ou excluir"
-                      className="win95-btn px-2.5 py-1.5 flex items-center gap-1 font-pixel text-sm font-bold text-black cursor-pointer shrink-0"
+                      className="py-2 px-2 bg-[#dfdfdf] hover:bg-white border-2 border-t-white border-l-white border-r-black border-b-black font-bold flex items-center justify-center gap-1"
                     >
-                      <Edit2 className="w-3.5 h-3.5 text-[#000080]" />
+                      <Edit2 className="w-3.5 h-3.5" />
                       <span>Editar</span>
                     </button>
-                  </div>
 
-                  {/* Target URL Field in Recessed Inset Box */}
-                  <div className="space-y-1">
-                    <label className="block font-pixel text-xs font-bold text-black">
-                      Destino (URL do Atalho):
-                    </label>
-                    <div className="win95-inset px-2 py-1 font-mono text-xs text-black truncate select-all">
-                      {activePropertiesApp.url}
-                    </div>
-                  </div>
-
-                  {/* Bottom 3D Beveled Launch Action Buttons */}
-                  <div className="pt-2 border-t border-[#808080] flex flex-col sm:flex-row items-stretch gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                        const target = activePropertiesApp;
-                        setPropertiesApp(null);
-                        setRetroBrowserApp(target);
+                        const targetId = activeWindow.app.id;
+                        closeRetroWindow(activeWindow.id);
+                        onDeleteApp(targetId);
                       }}
-                      data-testid="win95-open-in-hub"
-                      className="flex-1 min-h-[38px] win95-btn px-3 py-1.5 font-pixel text-sm sm:text-base font-bold text-black flex items-center justify-center gap-1.5 cursor-pointer border border-black"
+                      className="py-2 px-2 bg-[#dfdfdf] hover:bg-red-100 text-red-800 border-2 border-t-white border-l-white border-r-black border-b-black font-bold flex items-center justify-center gap-1"
                     >
-                      <Monitor className="w-4 h-4 text-[#000080] shrink-0" />
-                      <span>[ Executar no Hub (Interno) ]</span>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Excluir</span>
                     </button>
-
-                    <a
-                      href={activePropertiesApp.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => setPropertiesApp(null)}
-                      data-testid="win95-open-external"
-                      className="flex-1 min-h-[38px] win95-btn px-3 py-1.5 font-pixel text-sm sm:text-base font-bold text-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col min-h-[260px]">
+                  {/* Retro Address Bar */}
+                  <div className="p-1.5 bg-[#c0c0c0] border-b border-neutral-500 flex items-center gap-1.5 text-xs">
+                    <span className="font-bold">URL:</span>
+                    <div className="flex-1 px-2 py-0.5 bg-white border border-black truncate">
+                      {activeWindow.app.url} (
+                      {extractHostname(activeWindow.app.url)})
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => reloadBrowserWindow(activeWindow.id)}
+                      className="px-2 py-0.5 bg-[#dfdfdf] border border-black font-bold flex items-center gap-1"
+                      title="Recarregar"
                     >
-                      <span>[ Abrir no Navegador ↗ ]</span>
-                      <ExternalLink className="w-3.5 h-3.5 text-[#000080] shrink-0" />
-                    </a>
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenExternal(activeWindow.app)}
+                      className="px-2 py-0.5 bg-[#dfdfdf] border border-black font-bold flex items-center gap-1"
+                      title="Abrir em Nova Aba"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span>↗</span>
+                    </button>
                   </div>
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* ===================================================================== */}
-          {/* 3. VISUALIZADOR INTERNO ESTILO "NAVEGADOR ANTIGO (IE4 / NETSCAPE)"    */}
-          {/* ===================================================================== */}
-          {activeBrowserApp && (
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Navegador Retrô - ${activeBrowserApp.name}`}
-              data-testid="retro-browser-window"
-              className="absolute inset-0 z-40 win95-window p-1 flex flex-col overflow-hidden"
-            >
-              {/* Classic Win95 Title Bar */}
-              <div className="win95-titlebar px-2 py-1 flex items-center justify-between gap-2 shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Win95FlagSVG />
-                  <span className="font-pixel-title text-[9px] sm:text-[10px] text-white truncate">
-                    {activeBrowserApp.name} - Netscape / Internet Explorer 4.0
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setRetroBrowserApp(null)}
-                    aria-label="Fechar navegador retrô"
-                    className="win95-btn px-2 h-5 flex items-center justify-center font-mono text-xs font-bold text-black cursor-pointer"
-                  >
-                    [X] Fechar
-                  </button>
-                </div>
-              </div>
-
-              {/* Classic Beveled Browser Toolbar + Address Bar + Viewport Switcher */}
-              <div className="win95-outset px-2 py-1.5 flex flex-wrap items-center justify-between gap-2 shrink-0 border-b border-[#808080]">
-                {/* Left Navigation Buttons */}
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setRetroBrowserApp(null)}
-                    className="win95-btn px-2 py-1 font-pixel text-xs sm:text-sm font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    <span>Área de Trabalho</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setIframeKey((k) => k + 1)}
-                    title="Recarregar página"
-                    className="win95-btn px-2 py-1 font-pixel text-xs sm:text-sm font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    <RotateCw className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Atualizar</span>
-                  </button>
-                </div>
-
-                {/* Recessed Address Bar */}
-                <div className="flex items-center gap-1.5 flex-1 min-w-[160px]">
-                  <span className="font-pixel text-xs sm:text-sm font-bold text-black hidden md:inline">
-                    Endereço:
-                  </span>
-                  <div className="flex-1 win95-inset px-2 py-0.5 font-mono text-xs text-black truncate">
-                    {activeBrowserApp.url}
-                  </div>
-                </div>
-
-                {/* Viewport Simulation Buttons (Desktop Only — Mobile is always 100% full screen) */}
-                <div className="hidden md:flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setBrowserViewport('desktop')}
-                    className={`win95-btn px-2 py-1 font-pixel text-xs font-bold flex items-center gap-1 cursor-pointer ${
-                      browserViewport === 'desktop' ? 'win95-btn-active' : ''
-                    }`}
-                  >
-                    <Monitor className="w-3 h-3" />
-                    <span>Desktop</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBrowserViewport('tablet')}
-                    className={`win95-btn px-2 py-1 font-pixel text-xs font-bold flex items-center gap-1 cursor-pointer ${
-                      browserViewport === 'tablet' ? 'win95-btn-active' : ''
-                    }`}
-                  >
-                    <Tablet className="w-3 h-3" />
-                    <span>Tablet</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBrowserViewport('mobile')}
-                    className={`win95-btn px-2 py-1 font-pixel text-xs font-bold flex items-center gap-1 cursor-pointer ${
-                      browserViewport === 'mobile' ? 'win95-btn-active' : ''
-                    }`}
-                  >
-                    <Smartphone className="w-3 h-3" />
-                    <span>Mobile</span>
-                  </button>
-                </div>
-
-                {/* Open Externally */}
-                <a
-                  href={activeBrowserApp.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="win95-btn px-2.5 py-1 font-pixel text-xs sm:text-sm font-bold flex items-center gap-1 text-black shrink-0"
-                >
-                  <span>Abrir Fora ↗</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-
-              {/* Browser Content Stage */}
-              <div className="flex-1 w-full min-h-0 win95-inset bg-[#808080] flex items-center justify-center overflow-hidden">
-                {/* Mobile always renders 100% full bleed */}
-                <div className="w-full h-full sm:hidden bg-white">
-                  <iframe
-                    key={`retro-mob-${iframeKey}`}
-                    src={activeBrowserApp.url}
-                    title={activeBrowserApp.name}
-                    className="w-full h-full border-0"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                  />
-                </div>
-
-                {/* Desktop Viewports */}
-                <div className="hidden sm:flex w-full h-full items-center justify-center">
-                  {browserViewport === 'desktop' && (
+                  <div className="flex-1 bg-white">
                     <iframe
-                      key={`retro-desk-${iframeKey}`}
-                      src={activeBrowserApp.url}
-                      title={activeBrowserApp.name}
-                      className="w-full h-full border-0 bg-white"
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                      key={`${activeWindow.id}-${activeWindow.reloadKey}`}
+                      src={activeWindow.app.url}
+                      title={activeWindow.app.name}
+                      className="w-full h-full border-0"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
                     />
-                  )}
-                  {browserViewport === 'tablet' && (
-                    <div className="w-[768px] max-w-full h-full win95-window p-2 flex flex-col">
-                      <iframe
-                        key={`retro-tab-${iframeKey}`}
-                        src={activeBrowserApp.url}
-                        title={activeBrowserApp.name}
-                        className="flex-1 w-full border-0 bg-white"
-                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                      />
-                    </div>
-                  )}
-                  {browserViewport === 'mobile' && (
-                    <div className="w-[390px] max-w-full h-full win95-window p-2 flex flex-col">
-                      <iframe
-                        key={`retro-phone-${iframeKey}`}
-                        src={activeBrowserApp.url}
-                        title={activeBrowserApp.name}
-                        className="flex-1 w-full border-0 bg-white"
-                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                      />
-                    </div>
-                  )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
-          {/* ===================================================================== */}
-          {/* 4. BARRA DE TAREFAS INFERIOR DO WINDOWS 95 + MENU [INICIAR]           */}
-          {/* ===================================================================== */}
-          <div
-            ref={startMenuRef}
-            onClick={(e) => e.stopPropagation()}
-            className="relative z-30 w-full win95-outset px-1.5 py-1 flex items-center justify-between gap-1.5 shrink-0"
-          >
-            {/* Cascading Windows 95 Start Menu Popup */}
-            {isStartMenuOpen && (
-              <div
-                data-testid="win95-start-menu"
-                className="absolute bottom-full left-1 mb-1 w-72 sm:w-80 win95-window p-1 flex z-50"
-              >
-                {/* Classic Vertical Navy Blue Side Banner */}
-                <div className="w-7 bg-gradient-to-t from-[#000080] via-[#000080] to-[#1084d0] flex items-end justify-center pb-3 select-none shrink-0">
-                  <span className="-rotate-90 whitespace-nowrap font-pixel-title text-[10px] text-white tracking-widest">
-                    APPS HUB 95
-                  </span>
+          {/* Classic Win95 Start Menu */}
+          {isStartMenuOpen && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute bottom-9 left-1 z-40 w-64 bg-[#c0c0c0] border-2 border-t-white border-l-white border-r-black border-b-black shadow-2xl flex text-black font-mono text-xs"
+            >
+              <div className="w-7 bg-[#000080] text-white flex items-end justify-center pb-2 font-bold">
+                <span className="-rotate-90 whitespace-nowrap tracking-widest text-[11px]">
+                  RETRO OS 98
+                </span>
+              </div>
+              <div className="flex-1 p-1.5 divide-y divide-neutral-400">
+                <div className="pb-1.5 max-h-48 overflow-y-auto space-y-0.5">
+                  {apps.slice(0, 12).map((app) => (
+                    <button
+                      key={app.id}
+                      type="button"
+                      onClick={() => openRetroWindow(app, 'browser')}
+                      className="w-full px-2 py-1 hover:bg-[#000080] hover:text-white flex items-center justify-between text-left"
+                    >
+                      <span className="truncate">{app.name}</span>
+                      <span className="text-[10px] opacity-75">
+                        #{formatSlotNumber(app.slotIndex)}
+                      </span>
+                    </button>
+                  ))}
                 </div>
-
-                {/* Menu Items List */}
-                <div className="flex-1 p-1 space-y-1 text-black font-pixel text-sm">
-                  {/* Back to Indie Pixel Studio (Zoom Out) */}
+                <div className="pt-1.5 space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsStartMenuOpen(false);
+                      onAddAtSlot(0);
+                    }}
+                    className="w-full px-2 py-1.5 hover:bg-[#000080] hover:text-white flex items-center gap-2 text-left font-bold"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Novo Web App...</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
                       setIsStartMenuOpen(false);
                       onBackToPixelStudio();
                     }}
-                    className="w-full text-left px-2.5 py-1.5 hover:bg-[#000080] hover:text-white flex items-center gap-2 font-bold cursor-pointer"
+                    className="w-full px-2 py-1.5 hover:bg-[#000080] hover:text-white flex items-center gap-2 text-left font-bold"
                   >
-                    <ArrowLeft className="w-4 h-4 shrink-0" />
-                    <span>Voltar ao Estúdio Indie (Zoom Out)</span>
-                  </button>
-
-                  <div className="border-t border-[#808080] border-b border-white my-1" />
-
-                  {/* Category Filter Section */}
-                  <div className="px-2 py-0.5 text-xs font-bold text-[#000080]">
-                    FILTRAR POR ESTAÇÃO / CATEGORIA:
-                  </div>
-                  <div className="grid grid-cols-2 gap-1 px-1 pb-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onCategoryChange('ALL');
-                        setIsStartMenuOpen(false);
-                      }}
-                      className={`text-left px-2 py-1 text-xs font-bold cursor-pointer ${
-                        selectedCategory === 'ALL'
-                          ? 'bg-[#000080] text-white'
-                          : 'hover:bg-[#000080] hover:text-white'
-                      }`}
-                    >
-                      • Todos (40 Slots)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onCategoryChange('DevTools,IA');
-                        setIsStartMenuOpen(false);
-                      }}
-                      className={`text-left px-2 py-1 text-xs font-bold cursor-pointer ${
-                        selectedCategory === 'DevTools,IA'
-                          ? 'bg-[#000080] text-white'
-                          : 'hover:bg-[#000080] hover:text-white'
-                      }`}
-                    >
-                      • DevTools & IA
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onCategoryChange('Design,Social,Cliente');
-                        setIsStartMenuOpen(false);
-                      }}
-                      className={`text-left px-2 py-1 text-xs font-bold cursor-pointer ${
-                        selectedCategory === 'Design,Social,Cliente'
-                          ? 'bg-[#000080] text-white'
-                          : 'hover:bg-[#000080] hover:text-white'
-                      }`}
-                    >
-                      • Design & Social
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onCategoryChange('Finanças,Produtividade,Utilitário,SaaS');
-                        setIsStartMenuOpen(false);
-                      }}
-                      className={`text-left px-2 py-1 text-xs font-bold cursor-pointer ${
-                        selectedCategory ===
-                        'Finanças,Produtividade,Utilitário,SaaS'
-                          ? 'bg-[#000080] text-white'
-                          : 'hover:bg-[#000080] hover:text-white'
-                      }`}
-                    >
-                      • Finanças & Prod.
-                    </button>
-                    {APP_CATEGORIES.map((cat) => (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => {
-                          onCategoryChange(cat);
-                          setIsStartMenuOpen(false);
-                        }}
-                        className={`text-left px-2 py-0.5 text-xs cursor-pointer ${
-                          selectedCategory === cat
-                            ? 'bg-[#000080] text-white font-bold'
-                            : 'hover:bg-[#000080] hover:text-white'
-                        }`}
-                      >
-                        ◦ {cat}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="border-t border-[#808080] border-b border-white my-1" />
-
-                  {/* Columns per Row Selector in Start Menu */}
-                  <div className="px-2 py-1 flex items-center justify-between gap-1">
-                    <span className="text-xs font-bold flex items-center gap-1">
-                      <SlidersHorizontal className="w-3 h-3" /> Colunas:
-                    </span>
-                    <div className="flex items-center gap-1">
-                      {([2, 3, 4, 6, 8] as GridColumnsPerRow[]).map((cols) => (
-                        <button
-                          key={cols}
-                          type="button"
-                          onClick={() => onChangeGridColumns(cols)}
-                          className={`win95-btn px-1.5 py-0.5 text-xs font-mono font-bold cursor-pointer ${
-                            gridColumns === cols ? 'win95-btn-active' : ''
-                          }`}
-                        >
-                          {cols}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Desktop Customizations */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onToggleOrganizeMode();
-                      setIsStartMenuOpen(false);
-                    }}
-                    className="w-full text-left px-2.5 py-1 hover:bg-[#000080] hover:text-white flex items-center gap-2 cursor-pointer"
-                  >
-                    <Move className="w-3.5 h-3.5 shrink-0" />
-                    <span>
-                      {isOrganizeMode
-                        ? 'Desativar Modo Organizar'
-                        : 'Organizar / Mover Slots'}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setRetroDarkBg((prev) => !prev)}
-                    className="w-full text-left px-2.5 py-1 hover:bg-[#000080] hover:text-white flex items-center gap-2 cursor-pointer"
-                  >
-                    <Monitor className="w-3.5 h-3.5 shrink-0" />
-                    <span>
-                      Fundo: {retroDarkBg ? 'Teal Clássico (#008080)' : 'Teal Noturno'}
-                    </span>
-                  </button>
-
-                  {!isNarrowScreen && (
-                    <button
-                      type="button"
-                      onClick={() => setShowCrtBezel((prev) => !prev)}
-                      className="w-full text-left px-2.5 py-1 hover:bg-[#000080] hover:text-white flex items-center gap-2 cursor-pointer"
-                    >
-                      <Monitor className="w-3.5 h-3.5 shrink-0" />
-                      <span>
-                        Moldura CRT Bege: {showCrtBezel ? 'Ligada' : 'Desligada'}
-                      </span>
-                    </button>
-                  )}
-
-                  <div className="border-t border-[#808080] border-b border-white my-1" />
-
-                  {/* Cloud Sync & New App */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsStartMenuOpen(false);
-                      onOpenCloudModal();
-                    }}
-                    className="w-full text-left px-2.5 py-1.5 hover:bg-[#000080] hover:text-white flex items-center gap-2 font-bold cursor-pointer"
-                  >
-                    <Cloud className="w-4 h-4 shrink-0" />
-                    <span>Sincronização Nuvem & Backup JSON...</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsStartMenuOpen(false);
-                      onOpenNewAppModal();
-                    }}
-                    className="w-full text-left px-2.5 py-1.5 hover:bg-[#000080] hover:text-white flex items-center gap-2 font-bold cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4 shrink-0" />
-                    <span>Novo Atalho Web App...</span>
+                    <Gamepad2 className="w-3.5 h-3.5" />
+                    <span>Voltar ao Estúdio Pixel</span>
                   </button>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Left: [Iniciar] Button + Quick Studio Zoom-Out Button */}
-            <div className="flex items-center gap-1.5 shrink-0">
+          {/* Bottom Multi-Window Taskbar (Up to 3 Simultaneous Windows) */}
+          <div className="h-8 px-1.5 bg-[#c0c0c0] border-t-2 border-white flex items-center justify-between gap-2 shrink-0 z-30 font-mono text-xs text-black">
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
               <button
                 type="button"
-                onClick={() => setIsStartMenuOpen((prev) => !prev)}
-                data-testid="win95-start-button"
-                className={`win95-btn px-2.5 py-1 flex items-center gap-1.5 font-pixel-title text-[10px] sm:text-xs font-bold text-black cursor-pointer ${
-                  isStartMenuOpen ? 'win95-btn-active' : ''
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsStartMenuOpen((prev) => !prev);
+                }}
+                className={`px-2.5 py-0.5 border-2 font-bold flex items-center gap-1 shrink-0 cursor-pointer ${
+                  isStartMenuOpen
+                    ? 'border-t-black border-l-black border-r-white border-b-white bg-[#dfdfdf]'
+                    : 'border-t-white border-l-white border-r-black border-b-black bg-[#c0c0c0]'
                 }`}
               >
-                <Win95FlagSVG />
+                <Sparkles className="w-3.5 h-3.5 text-teal-800" />
                 <span>Iniciar</span>
               </button>
 
-              <button
-                type="button"
-                onClick={onBackToPixelStudio}
-                title="Voltar ao Estúdio Indie (Zoom Out)"
-                className="hidden sm:inline-flex win95-btn px-2 py-1 items-center gap-1 font-pixel text-xs sm:text-sm font-bold text-black cursor-pointer"
-              >
-                <ArrowLeft className="w-3 h-3" />
-                <span>Estúdio Pixel</span>
-              </button>
-            </div>
-
-            {/* Center: Recessed Quick Search Input (Raycast Retrô) */}
-            <div className="flex items-center gap-1 flex-1 max-w-xs min-w-[110px]">
-              <div className="relative flex-1 win95-inset flex items-center px-1.5 py-0.5 bg-white">
-                <Search className="w-3 h-3 text-[#808080] shrink-0 mr-1" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => onSearchChange(e.target.value)}
-                  placeholder="Buscar app ou URL..."
-                  aria-label="Buscar aplicativo no Retro OS"
-                  className="w-full bg-transparent text-black placeholder-neutral-500 font-pixel text-xs sm:text-sm focus:outline-none"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => onSearchChange('')}
-                    aria-label="Limpar busca"
-                    className="text-black hover:text-red-600 cursor-pointer"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                )}
+              {/* Multi-Window Taskbar Tabs (Max 3) */}
+              <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1">
+                {windows.map((win) => {
+                  const isFocused =
+                    !win.minimized && activeWindow?.id === win.id;
+                  return (
+                    <button
+                      key={win.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isFocused) {
+                          toggleMinimizeWindow(win.id);
+                        } else {
+                          setWindows((prev) =>
+                            prev.map((w) =>
+                              w.id === win.id ? { ...w, minimized: false } : w
+                            )
+                          );
+                          setFocusedWindowId(win.id);
+                        }
+                      }}
+                      className={`px-2 py-0.5 border-2 text-[11px] truncate max-w-[160px] flex items-center gap-1 cursor-pointer ${
+                        isFocused
+                          ? 'bg-[#e6e6e6] border-t-black border-l-black border-r-white border-b-white font-bold'
+                          : 'bg-[#c0c0c0] border-t-white border-l-white border-r-black border-b-black'
+                      }`}
+                    >
+                      <span className="truncate">
+                        #{formatSlotNumber(win.app.slotIndex)} {win.app.name}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Right: System Tray (Cloud Sync Indicator + Real-Time Digital Clock) */}
-            <div className="win95-inset-panel px-2 py-0.5 flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={onOpenCloudModal}
-                title="Status da Nuvem / Backup"
-                className="flex items-center gap-1 text-black cursor-pointer"
-              >
-                {syncStatus === 'online' ? (
-                  <Cloud className="w-3.5 h-3.5 text-[#000080]" />
-                ) : (
-                  <HardDrive className="w-3.5 h-3.5 text-neutral-700" />
-                )}
-                <span className="hidden md:inline font-pixel text-xs font-bold">
-                  {syncStatus === 'online' ? 'ONLINE' : 'LOCAL'}
-                </span>
-              </button>
-
-              <span className="font-mono text-xs font-bold text-black tabular-nums">
-                {timeString}
-              </span>
+            {/* System Tray Clock */}
+            <div className="px-2 py-0.5 bg-[#bdbdbd] border border-t-neutral-600 border-l-neutral-600 border-r-white border-b-white text-[11px] font-bold shrink-0">
+              {clockText}
             </div>
           </div>
         </div>
-
-        {/* Bottom CRT Monitor Physical Chin Badge (Desktop Only) */}
-        {showCrtBezel && !isNarrowScreen && (
-          <div className="hidden sm:flex items-center justify-between px-4 pt-1.5 text-xs font-pixel text-neutral-700 shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="font-pixel-title text-[9px] text-neutral-800">
-                SONOMA-CRT // MULTISYNC 95
-              </span>
-              <span className="text-neutral-500">·</span>
-              <span>40 SLOTS MATRIX</span>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setShowCrtBezel(false)}
-                className="text-[11px] underline hover:text-black cursor-pointer"
-              >
-                Ocultar Borda do Monitor
-              </button>
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 border border-emerald-700 shadow-[0_0_6px_#22c55e]" />
-                POWER
-              </span>
-            </div>
-          </div>
-        )}
       </div>
-    </main>
+    </div>
   );
 };

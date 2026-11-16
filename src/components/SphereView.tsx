@@ -1,18 +1,9 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { Plus, Compass } from 'lucide-react';
+import { WebAppItem, CATEGORY_COLORS } from '../types/launcher';
 import {
-  Eye,
-  ExternalLink,
-  Edit2,
-  Plus,
-  Compass,
-  ZoomIn,
-  ZoomOut,
-  Sparkles,
-} from 'lucide-react';
-import { ACCENT_COLOR_MAP, WebAppItem } from '../types/launcher';
-import {
-  generateHexSpiralCoordinates,
-  projectSphericalBubble,
+  formatSlotNumber,
+  sortAppsWithMagneticFilter,
 } from '../utils/launcherLogic';
 import { AppLogo } from './AppLogo';
 
@@ -20,480 +11,297 @@ interface SphereViewProps {
   apps: WebAppItem[];
   matchingAppIds: Set<string>;
   hasActiveFilter: boolean;
-  highlightedAppId?: string | null;
-  onPrimaryAppClick: (app: WebAppItem) => void;
-  onOpenLivePreview: (app: WebAppItem) => void;
-  onOpenEditModal: (app: WebAppItem) => void;
-  onOpenNewAppAtSlot: (slotIndex: number) => void;
+  onSelectApp: (app: WebAppItem, e?: React.MouseEvent) => void;
+  onDoubleClickApp?: (app: WebAppItem) => void;
+  onOpenExternal?: (app: WebAppItem) => void;
+  onContextMenuApp?: (app: WebAppItem, e: React.MouseEvent) => void;
+  onAddClick: () => void;
 }
-
-type SphereNode =
-  | { type: 'clock'; id: string }
-  | { type: 'app'; id: string; app: WebAppItem }
-  | { type: 'empty_slot'; id: string; slotIndex: number };
 
 export const SphereView: React.FC<SphereViewProps> = ({
   apps,
   matchingAppIds,
   hasActiveFilter,
-  highlightedAppId,
-  onPrimaryAppClick,
-  onOpenLivePreview,
-  onOpenEditModal,
-  onOpenNewAppAtSlot,
+  onSelectApp,
+  onDoubleClickApp,
+  onOpenExternal,
+  onContextMenuApp,
+  onAddClick,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [viewportSize, setViewportSize] = useState({ width: 960, height: 640 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [showAllSlotsInSphere, setShowAllSlotsInSphere] = useState(true);
-  const [focusedAppId, setFocusedAppId] = useState<string | null>(
-    apps[0]?.id || null
-  );
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+  const panStartRef = useRef({ x: 0, y: 0 });
+  const movedDistanceRef = useRef(0);
+
   const [now, setNow] = useState(() => new Date());
 
-  // Dragging state
-  const isDraggingRef = useRef(false);
-  const didMoveRef = useRef(false);
-  const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-
-  // Live clock tick for the center watchOS clock node
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
-  // Measure container viewport dynamically so sphere never overflows; lock zoom=1 on mobile
+  const recenterSphere = useCallback(() => {
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  // Space / Home shortcut to recenter the sphere
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const updateSize = () => {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        setViewportSize({ width: rect.width, height: rect.height });
-        if (rect.width < 640) {
-          setZoom(1);
-        }
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.code === 'Space' || e.key === 'Home') {
+        e.preventDefault();
+        recenterSphere();
       }
     };
-    updateSize();
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [recenterSphere]);
 
-  const isMobileViewport = viewportSize.width < 640;
-
-  // Build the spherical honeycomb nodes
-  const sphereNodes = useMemo<SphereNode[]>(() => {
-    const sortedApps = [...apps].sort((a, b) => a.slotIndex - b.slotIndex);
-    const occupiedSlots = new Set(sortedApps.map((a) => a.slotIndex));
-    const nodes: SphereNode[] = [{ type: 'clock', id: 'watchos-center-clock' }];
-
-    for (const app of sortedApps) {
-      nodes.push({ type: 'app', id: app.id, app });
-    }
-
-    if (showAllSlotsInSphere) {
-      const targetCount = sortedApps.length > 18 ? 37 : 19;
-      for (
-        let slotIdx = 0;
-        slotIdx < 40 && nodes.length < targetCount;
-        slotIdx++
-      ) {
-        if (!occupiedSlots.has(slotIdx)) {
-          nodes.push({
-            type: 'empty_slot',
-            id: `sphere-slot-${slotIdx}`,
-            slotIndex: slotIdx,
-          });
-        }
-      }
-    }
-
-    return nodes;
-  }, [apps, showAllSlotsInSphere]);
-
-  // Responsive spacing and sphere radius based on current viewport
-  const minDim = Math.min(viewportSize.width, viewportSize.height);
-  const bubbleSpacing = Math.max(66, Math.min(104, minDim * 0.165));
-  const sphereRadius = Math.max(145, Math.min(340, minDim * 0.43));
-
-  const hexCoords = useMemo(
-    () => generateHexSpiralCoordinates(sphereNodes.length, bubbleSpacing),
-    [sphereNodes.length, bubbleSpacing]
+  // Magnetic Filter Attraction: pulls matching apps to inner rings closest to center clock
+  const orderedApps = useMemo(
+    () => sortAppsWithMagneticFilter(apps, matchingAppIds, hasActiveFilter),
+    [apps, matchingAppIds, hasActiveFilter]
   );
 
-  // Pointer drag handlers for smooth 360° spherical panning
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if ((e.target as HTMLElement).closest('[data-sphere-hud="true"]')) return;
-    isDraggingRef.current = true;
-    didMoveRef.current = false;
-    dragStartRef.current = {
-      x: e.clientX,
-      y: e.clientY,
-      panX: pan.x,
-      panY: pan.y,
-    };
+  // Compute concentric hexagonal / radial coordinates around (0,0)
+  const positionedNodes = useMemo(() => {
+    const ringCapacities = [6, 12, 18, 24];
+    const ringRadii = [132, 230, 325, 420];
+    const result: {
+      app: WebAppItem;
+      x: number;
+      y: number;
+      ringIndex: number;
+    }[] = [];
+
+    let appCursor = 0;
+    for (let r = 0; r < ringCapacities.length; r++) {
+      const cap = ringCapacities[r];
+      const radius = ringRadii[r];
+      const remaining = orderedApps.length - appCursor;
+      if (remaining <= 0) break;
+      const countInRing = Math.min(cap, remaining);
+      for (let i = 0; i < countInRing; i++) {
+        const angle = (i / countInRing) * Math.PI * 2 - Math.PI / 2;
+        result.push({
+          app: orderedApps[appCursor],
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
+          ringIndex: r,
+        });
+        appCursor++;
+      }
+    }
+    return result;
+  }, [orderedApps]);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    setIsDragging(true);
+    movedDistanceRef.current = 0;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    panStartRef.current = { x: pan.x, y: pan.y };
   };
 
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDraggingRef.current) return;
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isDragging) return;
     const dx = e.clientX - dragStartRef.current.x;
     const dy = e.clientY - dragStartRef.current.y;
-    if (Math.hypot(dx, dy) > 5) {
-      didMoveRef.current = true;
-    }
-    const effectiveZoom = isMobileViewport ? 1 : zoom;
-    const maxPan = bubbleSpacing * 2.6;
-    const nextX = Math.max(
-      -maxPan,
-      Math.min(maxPan, dragStartRef.current.panX + dx / effectiveZoom)
-    );
-    const nextY = Math.max(
-      -maxPan,
-      Math.min(maxPan, dragStartRef.current.panY + dy / effectiveZoom)
-    );
-    setPan({ x: nextX, y: nextY });
+    movedDistanceRef.current = Math.hypot(dx, dy);
+    const maxPan = 290;
+    setPan({
+      x: Math.max(-maxPan, Math.min(maxPan, panStartRef.current.x + dx)),
+      y: Math.max(-maxPan, Math.min(maxPan, panStartRef.current.y + dy)),
+    });
   };
 
   const handlePointerUp = () => {
-    isDraggingRef.current = false;
+    setIsDragging(false);
   };
 
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    if (isMobileViewport) return;
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.08 : -0.08;
-    setZoom((prev) =>
-      Math.max(0.75, Math.min(1.45, Number((prev + delta).toFixed(2))))
-    );
-  };
+  const timeString = now.toLocaleTimeString('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
-  const centerOnCoord = (worldX: number, worldY: number) => {
-    setPan({ x: -worldX, y: -worldY });
-  };
+  const dateString = now.toLocaleDateString('pt-BR', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+  });
 
-  const activeFocusId = highlightedAppId || focusedAppId;
-  const focusedApp =
-    apps.find((a) => a.id === activeFocusId) || apps[0] || null;
-
-  // Calculate clock hands angles
-  const seconds = now.getSeconds();
-  const minutes = now.getMinutes() + seconds / 60;
-  const hours = (now.getHours() % 12) + minutes / 60;
+  const isOffCenter = Math.hypot(pan.x, pan.y) > 8;
 
   return (
-    <main
+    <div
       ref={containerRef}
-      data-testid="sphere-view"
-      aria-label="Visualização em esfera dos aplicativos"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      onWheel={handleWheel}
-      className="relative z-10 flex-1 w-full h-full min-h-0 overflow-hidden flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+      className={`relative w-full h-full overflow-hidden flex items-center justify-center select-none ${
+        isDragging ? 'cursor-grabbing' : 'cursor-grab'
+      }`}
     >
-      {/* Subtle 3D Spherical Lens Backdrop & Concentric Horizon Rings */}
+      {/* Orbital Rings Background */}
       <div
+        className="relative flex items-center justify-center transition-transform duration-150 ease-out"
         style={{
-          width: `${sphereRadius * 2.08}px`,
-          height: `${sphereRadius * 2.08}px`,
+          transform: `translate3d(${pan.x}px, ${pan.y}px, 0)`,
         }}
-        className="relative flex items-center justify-center rounded-full pointer-events-none transition-all duration-200"
       >
-        <div className="absolute inset-0 rounded-full bg-radial from-indigo-500/12 via-slate-900/40 to-transparent border border-white/[0.07] shadow-[inset_0_0_80px_rgba(99,102,241,0.12)]" />
-        <div className="absolute inset-[16%] rounded-full border border-dashed border-white/[0.05]" />
-      </div>
+        {[132, 230, 325].map((radius) => (
+          <div
+            key={radius}
+            style={{ width: radius * 2, height: radius * 2 }}
+            className="absolute rounded-full border border-white/[0.06] pointer-events-none"
+          />
+        ))}
 
-      {/* Spherical Honeycomb Bubbles Layer */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        {sphereNodes.map((node, idx) => {
-          const coord = hexCoords[idx];
-          if (!coord) return null;
+        {/* Center WatchOS Live Clock Core */}
+        <div className="relative z-20 w-36 h-36 rounded-full bg-zinc-950/90 border border-white/15 shadow-2xl backdrop-blur-xl flex flex-col items-center justify-center text-center p-3 pointer-events-auto">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-indigo-400">
+            {dateString}
+          </span>
+          <span className="text-2xl font-display font-bold text-white tracking-tight mt-0.5">
+            {timeString}
+          </span>
+          <span className="text-[10px] font-mono text-zinc-400 mt-0.5">
+            {apps.length}/40 slots
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddClick();
+            }}
+            className="mt-1.5 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-600/25 hover:bg-indigo-600 text-[10px] font-medium text-indigo-200 hover:text-white border border-indigo-500/35 transition-colors"
+          >
+            <Plus className="w-3 h-3" /> Novo
+          </button>
+        </div>
 
-          const proj = projectSphericalBubble(
-            coord.x,
-            coord.y,
-            pan.x,
-            pan.y,
-            sphereRadius,
-            isMobileViewport ? 1 : zoom
+        {/* Spherical App Nodes with Fisheye Scale Effect */}
+        {positionedNodes.map(({ app, x, y }) => {
+          const effX = x + pan.x;
+          const effY = y + pan.y;
+          const distFromViewportCenter = Math.hypot(effX, effY);
+          const scale = Math.max(
+            0.68,
+            Math.min(1.12, 1.14 - distFromViewportCenter / 900)
           );
 
-          const bubbleBaseSize = Math.max(54, Math.min(78, minDim * 0.115));
+          const isMatched = matchingAppIds.has(app.id);
+          const isDimmed = hasActiveFilter && !isMatched;
+          const catColor = CATEGORY_COLORS[app.category] || '#6366f1';
+          const slotNum = formatSlotNumber(app.slotIndex);
 
-          if (node.type === 'clock') {
-            return (
-              <button
-                key={node.id}
-                type="button"
-                onClick={() => {
-                  if (didMoveRef.current) return;
-                  centerOnCoord(0, 0);
-                }}
-                aria-label="Relógio Central — Centralizar Esfera"
-                title="Relógio Central WatchOS (Clique para centralizar a esfera)"
-                style={{
-                  transform: `translate3d(${proj.screenX}px, ${proj.screenY}px, 0) scale(${proj.scale})`,
-                  opacity: proj.opacity,
-                  zIndex: proj.zIndex,
-                  width: `${bubbleBaseSize}px`,
-                  height: `${bubbleBaseSize}px`,
-                }}
-                className="pointer-events-auto absolute rounded-full bg-white text-slate-950 shadow-[0_12px_32px_rgba(0,0,0,0.65)] border-2 border-white/80 flex items-center justify-center transition-transform duration-150 ease-out cursor-pointer group"
-              >
-                {/* WatchOS Analog Clock Dial */}
-                <div className="relative w-full h-full rounded-full flex items-center justify-center">
-                  {[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330].map(
-                    (deg) => (
-                      <span
-                        key={deg}
-                        style={{
-                          transform: `rotate(${deg}deg) translateY(-${
-                            bubbleBaseSize * 0.39
-                          }px)`,
-                        }}
-                        className={`absolute w-0.5 ${
-                          deg % 90 === 0
-                            ? 'h-1.5 bg-slate-900'
-                            : 'h-1 bg-slate-400'
-                        } rounded-full`}
-                      />
-                    )
-                  )}
-                  <span
-                    style={{
-                      transform: `rotate(${hours * 30}deg)`,
-                      height: `${bubbleBaseSize * 0.24}px`,
-                      marginTop: `-${bubbleBaseSize * 0.24}px`,
-                    }}
-                    className="absolute w-1 bg-slate-900 rounded-full origin-bottom"
-                  />
-                  <span
-                    style={{
-                      transform: `rotate(${minutes * 6}deg)`,
-                      height: `${bubbleBaseSize * 0.34}px`,
-                      marginTop: `-${bubbleBaseSize * 0.34}px`,
-                    }}
-                    className="absolute w-0.5 bg-slate-900 rounded-full origin-bottom"
-                  />
-                  <span
-                    style={{
-                      transform: `rotate(${seconds * 6}deg)`,
-                      height: `${bubbleBaseSize * 0.38}px`,
-                      marginTop: `-${bubbleBaseSize * 0.38}px`,
-                    }}
-                    className="absolute w-[1.5px] bg-amber-500 rounded-full origin-bottom"
-                  />
-                  <span className="w-2 h-2 rounded-full bg-amber-500 border border-slate-900 z-10" />
-                </div>
-              </button>
-            );
-          }
-
-          if (node.type === 'app') {
-            const { app } = node;
-            const isMatched = matchingAppIds.has(app.id);
-            const isDimmed = hasActiveFilter && !isMatched;
-            const isFocused = focusedApp?.id === app.id;
-            const isHighlighted = highlightedAppId === app.id;
-            const accent =
-              ACCENT_COLOR_MAP[app.accentColor] || ACCENT_COLOR_MAP.indigo;
-
-            return (
+          return (
+            <div
+              key={app.id}
+              style={{
+                transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})`,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (movedDistanceRef.current > 8) return;
+                onSelectApp(app, e);
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                if (onDoubleClickApp) onDoubleClickApp(app);
+              }}
+              onAuxClick={(e) => {
+                if (e.button === 1 && onOpenExternal) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onOpenExternal(app);
+                }
+              }}
+              onContextMenu={(e) => {
+                if (onContextMenuApp) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onContextMenuApp(app, e);
+                }
+              }}
+              className={`group absolute z-20 flex flex-col items-center cursor-pointer transition-opacity duration-200 ${
+                isDimmed ? 'opacity-20 grayscale' : 'opacity-100'
+              }`}
+            >
               <div
-                key={node.id}
-                style={{
-                  transform: `translate3d(${proj.screenX}px, ${proj.screenY}px, 0) scale(${
-                    isHighlighted ? proj.scale * 1.12 : proj.scale
-                  })`,
-                  opacity: isDimmed ? proj.opacity * 0.25 : proj.opacity,
-                  zIndex: isHighlighted
-                    ? proj.zIndex + 50
-                    : isFocused
-                      ? proj.zIndex + 30
-                      : proj.zIndex,
-                }}
-                className="pointer-events-auto absolute flex flex-col items-center justify-center transition-transform duration-150 ease-out group"
+                className={`relative rounded-full p-1 transition-transform duration-150 group-hover:scale-110 ${
+                  hasActiveFilter && isMatched
+                    ? 'ring-2 ring-indigo-400 shadow-lg shadow-indigo-500/30'
+                    : ''
+                }`}
               >
-                <button
-                  type="button"
-                  data-testid={`sphere-app-${app.id}`}
-                  aria-label={`Esfera: ${app.name}`}
-                  onClick={() => {
-                    if (didMoveRef.current) return;
-                    setFocusedAppId(app.id);
-                    centerOnCoord(coord.x, coord.y);
-                    onPrimaryAppClick(app);
-                  }}
-                  style={{
-                    width: `${bubbleBaseSize}px`,
-                    height: `${bubbleBaseSize}px`,
-                  }}
-                  className={`relative rounded-full flex items-center justify-center shadow-[0_14px_34px_rgba(0,0,0,0.65)] transition-all cursor-pointer ${
-                    isHighlighted
-                      ? 'ring-4 ring-indigo-400 scale-110 shadow-[0_0_32px_rgba(99,102,241,0.55)]'
-                      : isFocused
-                        ? 'ring-2 ring-white/80 scale-105'
-                        : 'hover:ring-2 hover:ring-white/50'
-                  }`}
-                >
-                  {/* Full Circular WatchOS Orb with AppLogo */}
-                  <div
-                    className={`w-full h-full rounded-full bg-gradient-to-br ${accent.bgGradient} p-0.5 flex items-center justify-center shadow-inner overflow-hidden`}
-                  >
-                    <AppLogo
-                      name={app.name}
-                      url={app.url}
-                      accentColor={app.accentColor}
-                      customLogoUrl={app.customLogoUrl}
-                      size="md"
-                      shape="circle"
-                    />
-                  </div>
-                </button>
+                <AppLogo
+                  name={app.name}
+                  url={app.url}
+                  accentColor={app.accentColor}
+                  customLogoUrl={app.customLogoUrl}
+                  size="md"
+                  shape="circle"
+                />
 
-                {/* Crisp Floating App Label below magnified central/mid bubbles */}
-                {proj.scale > 0.68 && (
-                  <span className="mt-1 px-2 py-0.5 rounded-full bg-slate-950/85 backdrop-blur-md border border-white/10 text-[10px] font-medium text-white whitespace-nowrap shadow-md pointer-events-none">
-                    {app.name}
+                {/* Slot Badge */}
+                <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 px-1.5 py-0.2 rounded-full bg-zinc-950/95 border border-white/15 text-[9px] font-mono text-zinc-300 shadow">
+                  #{slotNum}
+                </span>
+
+                {/* External Only Badge */}
+                {app.openExternalOnly && (
+                  <span
+                    className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-amber-500 text-zinc-950 flex items-center justify-center text-[9px] font-bold shadow"
+                    title="Sempre abre em Nova Aba"
+                  >
+                    ↗
                   </span>
                 )}
-              </div>
-            );
-          }
 
-          // Empty Slot Bubble in Honeycomb Sphere
-          return (
-            <button
-              key={node.id}
-              type="button"
-              onClick={() => {
-                if (didMoveRef.current) return;
-                onOpenNewAppAtSlot(node.slotIndex);
-              }}
-              aria-label={`Adicionar App na Esfera (Slot ${node.slotIndex})`}
-              title={`Slot #${String(node.slotIndex).padStart(
-                2,
-                '0'
-              )} livre — Clique para adicionar um Web App`}
-              style={{
-                transform: `translate3d(${proj.screenX}px, ${proj.screenY}px, 0) scale(${proj.scale})`,
-                opacity: proj.opacity * 0.85,
-                zIndex: proj.zIndex,
-                width: `${bubbleBaseSize * 0.84}px`,
-                height: `${bubbleBaseSize * 0.84}px`,
-              }}
-              className="pointer-events-auto absolute rounded-full bg-slate-900/65 hover:bg-indigo-500/25 border border-dashed border-white/20 hover:border-indigo-400/60 backdrop-blur-md flex flex-col items-center justify-center gap-0.5 text-slate-400 hover:text-white shadow-lg transition-all duration-150 cursor-pointer group"
-            >
-              <Plus className="w-4 h-4 group-hover:scale-110 transition-transform" />
-              <span className="text-[9px] font-mono tabular-nums">
-                #{String(node.slotIndex).padStart(2, '0')}
+                {/* Category Indicator Dot */}
+                <span
+                  className="absolute top-0 left-0 w-2.5 h-2.5 rounded-full border border-zinc-950"
+                  style={{ backgroundColor: catColor }}
+                />
+              </div>
+
+              <span className="mt-2 px-2 py-0.5 rounded-md bg-zinc-950/85 border border-white/10 text-[11px] font-medium text-zinc-100 whitespace-nowrap shadow-md">
+                {app.name}
               </span>
-            </button>
+            </div>
           );
         })}
       </div>
 
-      {/* Bottom Floating WatchOS / Sonoma Sphere Control Dock */}
-      <div
-        data-sphere-hud="true"
-        className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[95vw] rounded-2xl bg-slate-900/85 backdrop-blur-2xl border border-white/15 shadow-2xl px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 sm:gap-3"
-      >
-        {focusedApp && (
-          <div className="flex items-center gap-2 pr-2 border-r border-white/10">
-            <span className="text-xs font-semibold text-white truncate max-w-[110px] sm:max-w-[150px]">
-              {focusedApp.name}
-            </span>
-            <button
-              type="button"
-              onClick={() => onOpenLivePreview(focusedApp)}
-              aria-label={`Preview de ${focusedApp.name}`}
-              title="Abrir pelo App"
-              className="p-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/35 text-indigo-200 transition-colors cursor-pointer"
-            >
-              <Eye className="w-3.5 h-3.5" />
-            </button>
-            <a
-              href={focusedApp.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={`Nova aba ${focusedApp.name}`}
-              title="Abrir no Navegador"
-              className="p-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-200 transition-colors cursor-pointer"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-            <button
-              type="button"
-              onClick={() => onOpenEditModal(focusedApp)}
-              aria-label={`Editar ${focusedApp.name}`}
-              title="Editar App"
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/15 text-slate-200 transition-colors cursor-pointer"
-            >
-              <Edit2 className="w-3.5 h-3.5" />
-            </button>
+      {/* Floating Recenter Button ("Centralizar (Espaço / Home)") */}
+      <div className="absolute bottom-4 right-4 z-30 flex items-center gap-2">
+        {hasActiveFilter && (
+          <div className="px-3 py-1.5 rounded-lg bg-indigo-950/90 border border-indigo-500/40 text-xs text-indigo-200 backdrop-blur-md shadow-lg">
+            Atração Magnética Ativa ({matchingAppIds.size} apps no centro)
           </div>
         )}
-
-        {/* Sphere Recenter & Honeycomb Controls (Zoom hidden on Mobile since app covers full screen) */}
-        <div className="flex items-center gap-1.5">
-          <div className="hidden sm:flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() =>
-                setZoom((z) => Math.max(0.75, Number((z - 0.12).toFixed(2))))
-              }
-              aria-label="Diminuir zoom da esfera"
-              title="Diminuir Zoom da Esfera"
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
-            >
-              <ZoomOut className="w-3.5 h-3.5" />
-            </button>
-            <span className="text-[11px] font-mono text-slate-300 tabular-nums px-1">
-              {Math.round(zoom * 100)}%
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                setZoom((z) => Math.min(1.45, Number((z + 0.12).toFixed(2))))
-              }
-              aria-label="Aumentar zoom da esfera"
-              title="Aumentar Zoom da Esfera"
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
-            >
-              <ZoomIn className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setPan({ x: 0, y: 0 });
-              setZoom(1);
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-medium text-slate-200 transition-colors cursor-pointer"
-          >
-            <Compass className="w-3 h-3 text-indigo-300" />
-            <span>Centralizar</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowAllSlotsInSphere((prev) => !prev)}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
-              showAllSlotsInSphere
-                ? 'bg-indigo-500/20 border-indigo-400/40 text-indigo-200'
-                : 'bg-white/5 border-white/10 text-slate-300'
-            }`}
-          >
-            <Sparkles className="w-3 h-3" />
-            <span>{showAllSlotsInSphere ? 'Colmeia Completa' : 'Só Apps'}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            recenterSphere();
+          }}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium backdrop-blur-xl shadow-lg transition-all ${
+            isOffCenter
+              ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-400/50'
+              : 'bg-zinc-950/85 hover:bg-zinc-900 text-zinc-300 border-white/15'
+          }`}
+          title="Centralizar câmera na Esfera (Atalho: Espaço ou Home)"
+        >
+          <Compass className="w-3.5 h-3.5" />
+          <span>Centralizar (Espaço / Home)</span>
+        </button>
       </div>
-    </main>
+    </div>
   );
 };

@@ -1,361 +1,379 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
-  Eye,
-  ExternalLink,
-  Edit2,
   Plus,
-  ArrowLeftRight,
-  Move,
+  Edit2,
+  Trash2,
+  GripVertical,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import {
-  GridColumnsPerRow,
-  GridScale,
   WebAppItem,
+  GridDensity,
+  CATEGORY_COLORS,
 } from '../types/launcher';
-import { computeSinglePageGridMetrics } from '../utils/launcherLogic';
+import {
+  buildFixedSlotArray,
+  formatSlotNumber,
+  paginateGridSlots,
+} from '../utils/launcherLogic';
 import { AppLogo } from './AppLogo';
 
 interface DesktopGridProps {
   apps: WebAppItem[];
   matchingAppIds: Set<string>;
   hasActiveFilter: boolean;
-  isOrganizeMode: boolean;
-  gridColumns: GridColumnsPerRow;
-  gridScale: GridScale;
-  highlightedAppId?: string | null;
-  onPrimaryAppClick: (app: WebAppItem) => void;
-  onOpenLivePreview: (app: WebAppItem) => void;
-  onOpenEditModal: (app: WebAppItem) => void;
-  onOpenNewAppAtSlot: (slotIndex: number) => void;
-  onMoveOrSwapSlot: (appId: string, targetSlotIndex: number) => void;
+  density: GridDensity;
+  isEditMode: boolean;
+  onActivateEditMode?: () => void;
+  onSelectApp: (app: WebAppItem, e?: React.MouseEvent) => void;
+  onDoubleClickApp?: (app: WebAppItem) => void;
+  onOpenExternal?: (app: WebAppItem) => void;
+  onContextMenuApp?: (app: WebAppItem, e: React.MouseEvent) => void;
+  onEditApp: (app: WebAppItem) => void;
+  onDeleteApp: (id: string) => void;
+  onAddAtSlot: (slotIndex: number) => void;
+  onSwapSlots: (sourceSlot: number, targetSlot: number) => void;
 }
+
+const MOBILE_SLOTS_PER_PAGE = 16; // 4x4 pages on mobile/tablet portrait
 
 export const DesktopGrid: React.FC<DesktopGridProps> = ({
   apps,
   matchingAppIds,
   hasActiveFilter,
-  isOrganizeMode,
-  gridColumns,
-  gridScale,
-  highlightedAppId,
-  onPrimaryAppClick,
-  onOpenLivePreview,
-  onOpenEditModal,
-  onOpenNewAppAtSlot,
-  onMoveOrSwapSlot,
+  density,
+  isEditMode,
+  onActivateEditMode,
+  onSelectApp,
+  onDoubleClickApp,
+  onOpenExternal,
+  onContextMenuApp,
+  onEditApp,
+  onDeleteApp,
+  onAddAtSlot,
+  onSwapSlots,
 }) => {
-  const [draggedAppId, setDraggedAppId] = useState<string | null>(null);
+  const slots = useMemo(() => buildFixedSlotArray(apps), [apps]);
+  const mobilePages = useMemo(
+    () => paginateGridSlots(slots, MOBILE_SLOTS_PER_PAGE),
+    [slots]
+  );
+
+  const [mobilePageIndex, setMobilePageIndex] = useState(0);
+  const [draggedSlot, setDraggedSlot] = useState<number | null>(null);
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
-  const [selectedForMoveAppId, setSelectedForMoveAppId] = useState<string | null>(
-    null
-  );
-  const [isNarrowScreen, setIsNarrowScreen] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth < 640 : false
-  );
 
-  React.useEffect(() => {
-    const onResize = () => {
-      setIsNarrowScreen(window.innerWidth < 640);
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+  const longPressTimerRef = useRef<number | null>(null);
+  const touchStartXRef = useRef<number | null>(null);
 
-  // Build O(1) lookup map from slotIndex to WebAppItem
-  const slotMap = new Map<number, WebAppItem>();
-  for (const app of apps) {
-    slotMap.set(app.slotIndex, app);
-  }
+  const clearLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
 
-  // On narrow/mobile screens (<640px), cap columns at 4 per row so 4 apps per row fit cleanly
-  const effectiveCols = (
-    isNarrowScreen && gridColumns > 4 ? 4 : gridColumns
-  ) as GridColumnsPerRow;
+  const handlePointerDownSlot = () => {
+    clearLongPress();
+    if (!isEditMode && onActivateEditMode) {
+      longPressTimerRef.current = window.setTimeout(() => {
+        onActivateEditMode();
+      }, 300);
+    }
+  };
 
-  const { columns, rows, visibleSlotCount } = computeSinglePageGridMetrics(
-    effectiveCols,
-    apps
-  );
-
-  const isDraggingAny = draggedAppId !== null || selectedForMoveAppId !== null;
-  const showEmptySlotGuides = isOrganizeMode || isDraggingAny;
-  const logoSize: 'xs' | 'sm' | 'md' =
-    gridScale === 'xs' || rows > 6 || (isNarrowScreen && effectiveCols >= 4)
-      ? 'xs'
-      : gridScale === 'compact' || rows >= 5
-        ? 'sm'
-        : 'md';
-
-  const handleDragStart = (
-    e: React.DragEvent<HTMLDivElement>,
-    app: WebAppItem
-  ) => {
-    setDraggedAppId(app.id);
-    e.dataTransfer.setData('text/plain', app.id);
+  const handleDragStart = (e: React.DragEvent, slotIdx: number) => {
+    clearLongPress();
+    setDraggedSlot(slotIdx);
     e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(slotIdx));
   };
 
-  const handleDragEnd = () => {
-    setDraggedAppId(null);
-    setDragOverSlot(null);
-  };
-
-  const handleDragOver = (
-    e: React.DragEvent<HTMLDivElement>,
-    slotIndex: number
-  ) => {
+  const handleDragOver = (e: React.DragEvent, slotIdx: number) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    if (dragOverSlot !== slotIndex) {
-      setDragOverSlot(slotIndex);
+    if (dragOverSlot !== slotIdx) {
+      setDragOverSlot(slotIdx);
     }
   };
 
-  const handleDrop = (
-    e: React.DragEvent<HTMLDivElement>,
-    targetSlotIndex: number
-  ) => {
+  const handleDrop = (e: React.DragEvent, targetIdx: number) => {
     e.preventDefault();
-    const sourceAppId =
-      draggedAppId || e.dataTransfer.getData('text/plain');
-    setDraggedAppId(null);
+    const sourceStr = e.dataTransfer.getData('text/plain');
+    const sourceIdx =
+      draggedSlot !== null ? draggedSlot : parseInt(sourceStr, 10);
+    setDraggedSlot(null);
     setDragOverSlot(null);
-
-    if (sourceAppId) {
-      onMoveOrSwapSlot(sourceAppId, targetSlotIndex);
+    if (!Number.isNaN(sourceIdx) && sourceIdx !== targetIdx) {
+      onSwapSlots(sourceIdx, targetIdx);
     }
   };
 
-  const handleSlotActionInOrganize = (
-    slotIndex: number,
-    occupant: WebAppItem | undefined
-  ) => {
-    if (selectedForMoveAppId) {
-      if (selectedForMoveAppId !== occupant?.id) {
-        onMoveOrSwapSlot(selectedForMoveAppId, slotIndex);
+  const handleTouchStartCarousel = (e: React.TouchEvent) => {
+    touchStartXRef.current = e.touches[0]?.clientX ?? null;
+  };
+
+  const handleTouchEndCarousel = (e: React.TouchEvent) => {
+    if (touchStartXRef.current === null) return;
+    const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
+    const deltaX = endX - touchStartXRef.current;
+    touchStartXRef.current = null;
+    if (Math.abs(deltaX) > 45) {
+      if (deltaX < 0 && mobilePageIndex < mobilePages.length - 1) {
+        setMobilePageIndex((p) => p + 1);
+      } else if (deltaX > 0 && mobilePageIndex > 0) {
+        setMobilePageIndex((p) => p - 1);
       }
-      setSelectedForMoveAppId(null);
-      return;
+    }
+  };
+
+  const densityGapClass =
+    density === 'compact'
+      ? 'gap-1.5 sm:gap-2 p-2 sm:p-3'
+      : density === 'expanded'
+        ? 'gap-2.5 sm:gap-3.5 p-3 sm:p-5'
+        : 'gap-2 sm:gap-2.5 p-2.5 sm:p-4';
+
+  const logoSize =
+    density === 'compact' ? 'xs' : density === 'expanded' ? 'md' : 'sm';
+
+  const renderSlotCell = (app: WebAppItem | null, slotIndex: number) => {
+    const slotNum = formatSlotNumber(slotIndex);
+    const isMatched = app ? matchingAppIds.has(app.id) : false;
+    const isDimmed = hasActiveFilter && (!app || !isMatched);
+    const isBeingDragged = draggedSlot === slotIndex;
+    const isDragTarget = dragOverSlot === slotIndex && draggedSlot !== slotIndex;
+
+    if (!app) {
+      return (
+        <button
+          key={`empty-${slotIndex}`}
+          type="button"
+          draggable={isEditMode}
+          onDragOver={(e) => handleDragOver(e, slotIndex)}
+          onDragLeave={() => setDragOverSlot(null)}
+          onDrop={(e) => handleDrop(e, slotIndex)}
+          onPointerDown={handlePointerDownSlot}
+          onPointerUp={clearLongPress}
+          onPointerCancel={clearLongPress}
+          onClick={() => onAddAtSlot(slotIndex)}
+          className={`group relative w-full h-full min-h-[56px] rounded-xl border transition-all duration-150 flex flex-col items-center justify-center select-none ${
+            isDragTarget
+              ? 'border-indigo-400 bg-indigo-500/20 scale-[1.02]'
+              : isEditMode
+                ? 'border-dashed border-white/20 bg-zinc-900/40 hover:border-indigo-400/60 hover:bg-indigo-500/10'
+                : 'border-white/[0.06] bg-white/[0.015] hover:border-white/20 hover:bg-white/[0.05]'
+          } ${isDimmed ? 'opacity-20' : ''}`}
+          title={`Slot #${slotNum} vazio — Clique para adicionar Web App`}
+        >
+          <span className="absolute top-1.5 left-2 text-[9px] font-mono text-zinc-600 group-hover:text-zinc-400 transition-colors">
+            #{slotNum}
+          </span>
+          <div className="w-7 h-7 rounded-lg border border-dashed border-white/10 group-hover:border-indigo-400/50 flex items-center justify-center text-zinc-600 group-hover:text-indigo-300 transition-all">
+            <Plus className="w-3.5 h-3.5" />
+          </div>
+        </button>
+      );
     }
 
-    if (occupant) {
-      setSelectedForMoveAppId(occupant.id);
-    } else {
-      onOpenNewAppAtSlot(slotIndex);
-    }
+    const catColor = CATEGORY_COLORS[app.category] || '#6366f1';
+
+    return (
+      <div
+        key={app.id}
+        draggable
+        onDragStart={(e) => handleDragStart(e, slotIndex)}
+        onDragOver={(e) => handleDragOver(e, slotIndex)}
+        onDragLeave={() => setDragOverSlot(null)}
+        onDrop={(e) => handleDrop(e, slotIndex)}
+        onDragEnd={() => {
+          setDraggedSlot(null);
+          setDragOverSlot(null);
+        }}
+        onPointerDown={handlePointerDownSlot}
+        onPointerUp={clearLongPress}
+        onPointerLeave={clearLongPress}
+        onPointerCancel={clearLongPress}
+        onClick={(e) => {
+          clearLongPress();
+          if (isEditMode) {
+            onEditApp(app);
+            return;
+          }
+          onSelectApp(app, e);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          clearLongPress();
+          if (!isEditMode && onDoubleClickApp) {
+            onDoubleClickApp(app);
+          }
+        }}
+        onAuxClick={(e) => {
+          if (e.button === 1 && onOpenExternal) {
+            e.preventDefault();
+            onOpenExternal(app);
+          }
+        }}
+        onContextMenu={(e) => {
+          if (onContextMenuApp) {
+            e.preventDefault();
+            e.stopPropagation();
+            onContextMenuApp(app, e);
+          }
+        }}
+        className={`group relative w-full h-full min-h-[56px] rounded-xl border transition-all duration-150 flex flex-col items-center justify-center p-1.5 select-none cursor-pointer ${
+          isDragTarget
+            ? 'border-indigo-400 bg-indigo-500/25 scale-[1.03] shadow-lg'
+            : isBeingDragged
+              ? 'opacity-40 scale-95 border-indigo-500/40'
+              : hasActiveFilter && isMatched
+                ? 'border-indigo-400/80 bg-zinc-900/90 ring-2 ring-indigo-500/30 shadow-xl'
+                : 'border-white/10 bg-zinc-900/55 hover:bg-zinc-900/85 hover:border-white/25 shadow-md'
+        } ${isDimmed ? 'opacity-20 grayscale' : ''} ${
+          isEditMode ? 'ring-1 ring-amber-400/40 animate-pulse' : ''
+        }`}
+        title={`${app.name} (#${slotNum}) — Clique: Detalhes | Duplo Clique: Abrir | Botão Direito: Menu`}
+      >
+        {/* Top Row: #Slot Badge + Category Dot / External Indicator */}
+        <div className="absolute top-1.5 inset-x-2 flex items-center justify-between pointer-events-none">
+          <span className="text-[9px] font-mono font-medium text-zinc-500 group-hover:text-zinc-300">
+            #{slotNum}
+          </span>
+          <div className="flex items-center gap-1">
+            {app.openExternalOnly && (
+              <span
+                className="px-1 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-[8px] font-mono font-bold text-amber-300"
+                title="Sempre abre em Nova Aba"
+              >
+                ↗
+              </span>
+            )}
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: catColor }}
+            />
+          </div>
+        </div>
+
+        {/* Edit Mode Overlay Controls */}
+        {isEditMode && (
+          <div className="absolute -top-1.5 -right-1.5 z-20 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onEditApp(app);
+              }}
+              className="w-5 h-5 rounded-md bg-zinc-900 border border-white/20 text-zinc-200 hover:bg-indigo-600 hover:text-white flex items-center justify-center shadow"
+              title="Editar App"
+            >
+              <Edit2 className="w-2.5 h-2.5" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteApp(app.id);
+              }}
+              className="w-5 h-5 rounded-md bg-zinc-900 border border-white/20 text-rose-400 hover:bg-rose-600 hover:text-white flex items-center justify-center shadow"
+              title="Remover App"
+            >
+              <Trash2 className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        )}
+
+        {isEditMode && (
+          <div className="absolute bottom-1 right-1 text-zinc-500 pointer-events-none">
+            <GripVertical className="w-3 h-3" />
+          </div>
+        )}
+
+        {/* App Icon */}
+        <div className="mt-2 mb-1 transition-transform duration-150 group-hover:scale-105">
+          <AppLogo
+            name={app.name}
+            url={app.url}
+            accentColor={app.accentColor}
+            customLogoUrl={app.customLogoUrl}
+            size={logoSize}
+          />
+        </div>
+
+        {/* App Name */}
+        <span className="text-[11px] font-medium text-zinc-200 group-hover:text-white truncate max-w-[92%] text-center leading-tight">
+          {app.name}
+        </span>
+      </div>
+    );
   };
 
   return (
-    <main
-      aria-label="Área de trabalho de aplicativos"
-      className="relative z-10 flex-1 w-full h-full min-h-0 overflow-hidden px-2.5 sm:px-5 pb-2.5 pt-1 flex flex-col"
-    >
-      {/* Organize / Move Helper Banner */}
-      {(isOrganizeMode || selectedForMoveAppId) && (
-        <div className="w-full max-w-[1600px] mx-auto mb-1.5 px-3 py-1 rounded-xl bg-amber-500/10 border border-amber-400/25 backdrop-blur-md flex items-center justify-between gap-2 text-[11px] text-amber-200 shrink-0">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <Move className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-            <span className="truncate">
-              {selectedForMoveAppId
-                ? 'App selecionado! Toque em qualquer slot vazio para mover ou em outro app para trocar (Auto-Swap).'
-                : 'Modo Organização: Arraste ícones, toque para trocar de lugar, ou clique em um slot vazio (+) para criar.'}
-            </span>
-          </div>
-          {selectedForMoveAppId && (
-            <button
-              type="button"
-              onClick={() => setSelectedForMoveAppId(null)}
-              className="px-2 py-0.5 rounded-lg bg-amber-400/20 hover:bg-amber-400/30 text-amber-100 font-medium whitespace-nowrap cursor-pointer shrink-0"
-            >
-              Cancelar
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Single-Page Zero-Scroll Coordinate Matrix */}
+    <div className="relative w-full h-full overflow-hidden flex flex-col select-none">
+      {/* DESKTOP & LANDSCAPE TABLET: Fixed 8x5 Matrix (40 slots, zero vertical scroll) */}
       <div
-        data-testid="desktop-grid"
-        style={{
-          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-          gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-        }}
-        className="w-full max-w-[1600px] mx-auto flex-1 min-h-0 overflow-hidden grid gap-1.5 sm:gap-2.5"
+        className={`hidden md:grid md:grid-cols-8 md:grid-rows-5 w-full h-full max-w-[1640px] mx-auto ${densityGapClass}`}
       >
-        {Array.from({ length: visibleSlotCount }, (_, slotIndex) => {
-          const occupant = slotMap.get(slotIndex);
-          const isDropTarget = dragOverSlot === slotIndex;
-          const isBeingDragged = occupant && draggedAppId === occupant.id;
-          const isSelectedForMove =
-            occupant && selectedForMoveAppId === occupant.id;
-          const isHighlighted = occupant && highlightedAppId === occupant.id;
-          const isMatched = occupant
-            ? matchingAppIds.has(occupant.id)
-            : false;
-          const isDimmed = hasActiveFilter && occupant && !isMatched;
-
-          return (
-            <div
-              key={slotIndex}
-              data-slot-index={slotIndex}
-              onDragOver={(e) => handleDragOver(e, slotIndex)}
-              onDragLeave={() => {
-                if (dragOverSlot === slotIndex) setDragOverSlot(null);
-              }}
-              onDrop={(e) => handleDrop(e, slotIndex)}
-              className={`relative group/slot min-h-0 min-w-0 rounded-2xl transition-all duration-200 flex items-center justify-center p-1 ${
-                occupant
-                  ? isDropTarget
-                    ? 'bg-indigo-500/20 border-2 border-dashed border-indigo-400 scale-[1.02]'
-                    : isSelectedForMove
-                      ? 'bg-amber-500/15 border-2 border-amber-400/60'
-                      : isHighlighted
-                        ? 'bg-indigo-500/20 border-2 border-indigo-400 shadow-[0_0_28px_rgba(99,102,241,0.35)] scale-[1.04] z-20'
-                        : 'border border-transparent'
-                  : isDropTarget
-                    ? 'border-2 border-dashed border-indigo-400 bg-indigo-500/15 scale-[1.02]'
-                    : showEmptySlotGuides
-                      ? 'border border-dashed border-white/15 bg-white/5 hover:border-white/30 hover:bg-white/10'
-                      : 'border border-transparent hover:border-dashed hover:border-white/15 hover:bg-white/[0.03]'
-              }`}
-            >
-              {/* Occupied Slot -> Render macOS/iOS App Card */}
-              {occupant ? (
-                <div
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, occupant)}
-                  onDragEnd={handleDragEnd}
-                  data-testid={`app-card-${occupant.id}`}
-                  className={`group relative w-full h-full min-h-0 rounded-2xl p-1 flex flex-col items-center justify-center transition-all duration-200 cursor-grab active:cursor-grabbing ${
-                    isBeingDragged ? 'opacity-40 scale-95' : 'opacity-100'
-                  } ${
-                    isDimmed
-                      ? 'opacity-25 scale-95 grayscale pointer-events-none'
-                      : hasActiveFilter && isMatched
-                        ? 'ring-1 ring-indigo-400/50 bg-indigo-500/10'
-                        : 'hover:bg-white/[0.06]'
-                  }`}
-                >
-                  {/* Slot Index Coordinate Indicator (visible in Organize Mode or Dragging) */}
-                  {showEmptySlotGuides && (
-                    <span className="absolute top-1 left-1.5 text-[9px] font-mono text-slate-400 tabular-nums select-none">
-                      #{String(slotIndex).padStart(2, '0')}
-                    </span>
-                  )}
-
-                  {/* Auto-Swap Indicator Overlay */}
-                  {isDropTarget && draggedAppId !== occupant.id && (
-                    <div className="absolute inset-0 z-30 rounded-2xl bg-indigo-950/85 backdrop-blur-md border border-indigo-400 flex flex-col items-center justify-center gap-0.5 text-indigo-200 pointer-events-none">
-                      <ArrowLeftRight className="w-4 h-4 text-indigo-300 animate-pulse" />
-                      <span className="text-[10px] font-semibold">
-                        Trocar
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Floating Quick Action Menu (Visible on Hover on Desktop or when Highlighted) */}
-                  <div
-                    className={`absolute top-1 right-1 z-20 flex items-center gap-0.5 transition-opacity duration-150 bg-slate-950/90 backdrop-blur-xl border border-white/15 rounded-xl p-0.5 shadow-xl ${
-                      isHighlighted
-                        ? 'opacity-100'
-                        : 'opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 pointer-events-none sm:pointer-events-auto'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenLivePreview(occupant);
-                      }}
-                      aria-label={`Visualizar ${occupant.name} na tela`}
-                      title="Abrir pelo App (Live Preview)"
-                      className="hidden sm:inline-flex p-1 rounded-lg text-slate-300 hover:text-white hover:bg-indigo-500/30 transition-colors cursor-pointer"
-                    >
-                      <Eye className="w-3 h-3" />
-                    </button>
-
-                    <a
-                      href={occupant.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      aria-label={`Abrir ${occupant.name} em nova aba`}
-                      title="Abrir no Navegador"
-                      className="hidden sm:inline-flex p-1 rounded-lg text-slate-300 hover:text-white hover:bg-cyan-500/30 transition-colors cursor-pointer"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenEditModal(occupant);
-                      }}
-                      aria-label={`Editar ${occupant.name}`}
-                      title="Editar ou Excluir App"
-                      className="p-1 rounded-lg text-slate-200 hover:text-white hover:bg-white/15 transition-colors cursor-pointer"
-                    >
-                      <Edit2 className="w-3 h-3" />
-                    </button>
-                  </div>
-
-                  {/* Main Clickable App Icon & Title */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isOrganizeMode || selectedForMoveAppId) {
-                        handleSlotActionInOrganize(slotIndex, occupant);
-                      } else {
-                        onPrimaryAppClick(occupant);
-                      }
-                    }}
-                    aria-label={`Abrir ${occupant.name}`}
-                    className="flex flex-col items-center justify-center gap-1 sm:gap-1.5 w-full h-full min-h-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 rounded-xl cursor-pointer"
-                  >
-                    <AppLogo
-                      name={occupant.name}
-                      url={occupant.url}
-                      accentColor={occupant.accentColor}
-                      customLogoUrl={occupant.customLogoUrl}
-                      size={logoSize}
-                    />
-
-                    <div className="w-full text-center px-0.5 min-w-0">
-                      <div className="text-[11px] sm:text-xs font-medium text-slate-100 group-hover:text-white truncate leading-tight">
-                        {occupant.name}
-                      </div>
-                      <div className="text-[9px] sm:text-[10px] text-slate-400 truncate leading-tight">
-                        {occupant.category}
-                      </div>
-                    </div>
-                  </button>
-                </div>
-              ) : (
-                /* Empty Slot */
-                <button
-                  type="button"
-                  onClick={() => handleSlotActionInOrganize(slotIndex, undefined)}
-                  aria-label={`Adicionar Web App no slot ${slotIndex}`}
-                  title={`Slot #${slotIndex} livre — Clique para adicionar um Web App aqui`}
-                  className={`w-full h-full min-h-0 rounded-2xl flex flex-col items-center justify-center gap-0.5 transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 ${
-                    showEmptySlotGuides
-                      ? 'opacity-100'
-                      : 'opacity-0 group-hover/slot:opacity-100'
-                  }`}
-                >
-                  <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl border border-white/15 bg-white/5 flex items-center justify-center text-slate-400 group-hover/slot:text-white group-hover/slot:border-indigo-400/40 group-hover/slot:bg-indigo-500/20 transition-all">
-                    <Plus className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="text-[9px] font-mono text-slate-400 group-hover/slot:text-slate-200 tabular-nums">
-                    #{String(slotIndex).padStart(2, '0')}
-                  </span>
-                </button>
-              )}
-            </div>
-          );
-        })}
+        {slots.map((app, idx) => renderSlotCell(app, idx))}
       </div>
-    </main>
+
+      {/* MOBILE / PORTRAIT (< 768px): Horizontal Paginated Swipe Carousel (4x4 = 16 slots per page) */}
+      <div
+        className="flex md:hidden flex-col w-full h-full overflow-hidden p-2.5"
+        onTouchStart={handleTouchStartCarousel}
+        onTouchEnd={handleTouchEndCarousel}
+      >
+        <div className="flex-1 grid grid-cols-4 grid-rows-4 gap-2 w-full h-full">
+          {(mobilePages[mobilePageIndex] || []).map((app, localIdx) => {
+            const globalSlotIdx =
+              mobilePageIndex * MOBILE_SLOTS_PER_PAGE + localIdx;
+            return renderSlotCell(app, globalSlotIdx);
+          })}
+        </div>
+
+        {/* Mobile Carousel Pagination Controls */}
+        <div className="h-10 shrink-0 flex items-center justify-center gap-3 pt-1">
+          <button
+            type="button"
+            disabled={mobilePageIndex === 0}
+            onClick={() => setMobilePageIndex((p) => Math.max(0, p - 1))}
+            className="p-1.5 rounded-lg bg-zinc-900/80 border border-white/10 text-zinc-300 disabled:opacity-30"
+            aria-label="Página anterior"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <div className="flex items-center gap-2">
+            {mobilePages.map((_, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => setMobilePageIndex(idx)}
+                className={`h-2 rounded-full transition-all ${
+                  mobilePageIndex === idx
+                    ? 'w-6 bg-indigo-500'
+                    : 'w-2 bg-zinc-700 hover:bg-zinc-500'
+                }`}
+                aria-label={`Ir para página ${idx + 1}`}
+              />
+            ))}
+          </div>
+
+          <button
+            type="button"
+            disabled={mobilePageIndex >= mobilePages.length - 1}
+            onClick={() =>
+              setMobilePageIndex((p) => Math.min(mobilePages.length - 1, p + 1))
+            }
+            className="p-1.5 rounded-lg bg-zinc-900/80 border border-white/10 text-zinc-300 disabled:opacity-30"
+            aria-label="Próxima página"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </div>
   );
 };

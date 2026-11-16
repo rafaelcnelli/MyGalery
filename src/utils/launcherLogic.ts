@@ -1,9 +1,47 @@
 import {
   ACCENT_COLOR_MAP,
   AccentColor,
+  INITIAL_DEMO_APPS,
+  LauncherState,
   TOTAL_GRID_SLOTS,
   WebAppItem,
 } from '../types/launcher';
+
+const DEFAULT_DEMO_MAP = new Map<string, WebAppItem>(
+  INITIAL_DEMO_APPS.map((item) => [item.id, item])
+);
+
+function getRootDomain(rawUrl: string): string {
+  const host = extractHostname(rawUrl);
+  if (!host) return '';
+  const parts = host.split('.');
+  return parts.length >= 2 ? parts.slice(-2).join('.') : host;
+}
+
+/**
+ * Returns true if the item is one of the built-in INITIAL_DEMO_APPS
+ * and still points to the same root domain (even if an earlier version had a slightly
+ * different display title like "Vercel" vs "Vercel Cloud" or "wikipedia.org" vs "pt.wikipedia.org").
+ */
+export function isUnmodifiedDemoApp(app: Partial<WebAppItem>): boolean {
+  if (!app || typeof app.id !== 'string' || !app.id.startsWith('demo-app-')) {
+    return false;
+  }
+  const baseDemo = DEFAULT_DEMO_MAP.get(app.id);
+  if (!baseDemo) return true;
+  const appRoot = getRootDomain(app.url || '');
+  const demoRoot = getRootDomain(baseDemo.url);
+  if (!appRoot || !demoRoot) return true;
+  return appRoot === demoRoot;
+}
+
+/**
+ * Formats a 0-based slotIndex (0..39) as a 2-digit human-friendly slot number ("01".."40").
+ */
+export function formatSlotNumber(slotIndex: number): string {
+  const clamped = clampSlotIndex(slotIndex);
+  return String(clamped + 1).padStart(2, '0');
+}
 
 /**
  * Automatically normalizes a user-entered URL by trimming whitespace
@@ -17,6 +55,8 @@ export function normalizeAppUrl(rawUrl: string): string {
   }
   return `https://${trimmed.replace(/^\/+/, '')}`;
 }
+
+export const normalizeUrl = normalizeAppUrl;
 
 /**
  * Extracts a clean hostname (e.g. "linear.app") from any raw or normalized URL.
@@ -107,6 +147,15 @@ export function getFaviconSources(
   hostname: string;
   candidates: FaviconCandidate[];
 } {
+  if (customLogoUrl?.trim() === 'monogram://fallback') {
+    return {
+      custom: null,
+      primary: null,
+      secondary: null,
+      hostname: extractHostname(rawUrl),
+      candidates: [],
+    };
+  }
   const cleanCustom = customLogoUrl?.trim()
     ? normalizeAppUrl(customLogoUrl.trim())
     : null;
@@ -154,8 +203,6 @@ export function getFaviconSources(
   }
 
   if (hasSubpath || isHostedAppDomain) {
-    // Subpath & hosted apps (e.g. user.github.io/repo-name/) aren't indexed per-folder by Google S2,
-    // so check the app's own direct icons first!
     candidates.push(
       ...directCandidates,
       { url: primary, source: 'google' },
@@ -226,18 +273,79 @@ export function findFirstAvailableSlot(
   return 0;
 }
 
+export const findFirstEmptySlot = findFirstAvailableSlot;
+
 /**
- * Guarantees that no two apps occupy the same slotIndex.
- * If duplicates exist (e.g. from imported JSON), reassigns collisions to free slots.
+ * Builds a fixed 40-element array where each index 0..39 holds either the WebAppItem at that slot or null.
+ * Prioritizes user custom apps over unmodified demo apps and reassigns any colliding apps to free slots
+ * so no app is ever silently dropped or hidden.
+ */
+export function buildFixedSlotArray(
+  apps: WebAppItem[]
+): (WebAppItem | null)[] {
+  const arr: (WebAppItem | null)[] = Array.from(
+    { length: TOTAL_GRID_SLOTS },
+    () => null
+  );
+  const ordered = [...apps].sort((a, b) => {
+    const aDemo = isUnmodifiedDemoApp(a) ? 1 : 0;
+    const bDemo = isUnmodifiedDemoApp(b) ? 1 : 0;
+    if (aDemo !== bDemo) return aDemo - bDemo;
+    return clampSlotIndex(a.slotIndex) - clampSlotIndex(b.slotIndex);
+  });
+
+  const seenIds = new Set<string>();
+  const uniqueOrdered: WebAppItem[] = [];
+  for (const app of ordered) {
+    if (seenIds.has(app.id)) continue;
+    seenIds.add(app.id);
+    uniqueOrdered.push(app);
+  }
+
+  const overflow: WebAppItem[] = [];
+  for (const app of uniqueOrdered) {
+    const idx = clampSlotIndex(app.slotIndex);
+    if (!arr[idx]) {
+      arr[idx] = app;
+    } else {
+      overflow.push(app);
+    }
+  }
+
+  for (const app of overflow) {
+    for (let i = 0; i < TOTAL_GRID_SLOTS; i++) {
+      if (!arr[i]) {
+        arr[i] = { ...app, slotIndex: i };
+        break;
+      }
+    }
+  }
+
+  return arr;
+}
+
+/**
+ * Guarantees that no two apps share the same `id` or occupy the same `slotIndex`.
+ * User custom apps always claim their preferred slotIndex first before unmodified demo apps.
  */
 export function deduplicateSlots(apps: WebAppItem[]): WebAppItem[] {
+  const usedIds = new Set<string>();
   const usedSlots = new Set<number>();
   const result: WebAppItem[] = [];
 
-  for (const app of apps.slice(0, TOTAL_GRID_SLOTS)) {
+  const prioritized = [...apps].sort((a, b) => {
+    const aDemo = isUnmodifiedDemoApp(a) ? 1 : 0;
+    const bDemo = isUnmodifiedDemoApp(b) ? 1 : 0;
+    return aDemo - bDemo;
+  });
+
+  for (const app of prioritized) {
+    if (result.length >= TOTAL_GRID_SLOTS) break;
+    if (usedIds.has(app.id)) continue;
+    usedIds.add(app.id);
+
     let slot = clampSlotIndex(app.slotIndex);
     if (usedSlots.has(slot)) {
-      // Find first free slot
       let found = 0;
       for (let i = 0; i < TOTAL_GRID_SLOTS; i++) {
         if (!usedSlots.has(i)) {
@@ -364,8 +472,8 @@ export function upsertAppWithAutoSwap(
 }
 
 /**
- * Filters apps by search query (matching name, category, or hostname) and optional category filter.
- * Supports single category ("DevTools"), "ALL", or comma-separated workstation categories ("DevTools,IA").
+ * Filters apps by search query (matching name, category, URL/hostname, or slot #01..#40)
+ * and optional category filter ("ALL", single category, or comma-separated room filter).
  */
 export function getMatchingAppIds(
   apps: WebAppItem[],
@@ -375,15 +483,17 @@ export function getMatchingAppIds(
   const q = searchQuery.trim().toLowerCase();
   const matched = new Set<string>();
   const normalizedFilter = (categoryFilter || 'ALL').trim();
-  const allowedCategories =
-    normalizedFilter === 'ALL'
-      ? null
-      : new Set(
-          normalizedFilter
-            .split(',')
-            .map((c) => c.trim().toLowerCase())
-            .filter(Boolean)
-        );
+  const isAllCategories =
+    normalizedFilter.toUpperCase() === 'ALL' ||
+    normalizedFilter.toLowerCase() === 'todas';
+  const allowedCategories = isAllCategories
+    ? null
+    : new Set(
+        normalizedFilter
+          .split(',')
+          .map((c) => c.trim().toLowerCase())
+          .filter(Boolean)
+      );
 
   for (const app of apps) {
     const matchesCategory =
@@ -398,16 +508,80 @@ export function getMatchingAppIds(
     }
 
     const hostname = extractHostname(app.url);
+    const slotNumStr = formatSlotNumber(app.slotIndex); // "01".."40"
+    const slotLabel = `#${slotNumStr}`;
+    const slotZeroLabel = `#${String(app.slotIndex).padStart(2, '0')}`;
+
     if (
       app.name.toLowerCase().includes(q) ||
       app.category.toLowerCase().includes(q) ||
-      hostname.includes(q)
+      hostname.includes(q) ||
+      app.url.toLowerCase().includes(q) ||
+      slotLabel === q ||
+      slotZeroLabel === q ||
+      `slot ${slotNumStr}` === q ||
+      `slot ${app.slotIndex + 1}` === q
     ) {
       matched.add(app.id);
     }
   }
 
   return matched;
+}
+
+/**
+ * Magnetic Filter Attraction for Sphere View:
+ * When a filter or search query is active, matching apps are pulled first into
+ * the central hexagonal rings around the (0,0) clock, while non-matching apps
+ * are pushed to the outer rings.
+ */
+export function sortAppsWithMagneticFilter(
+  apps: WebAppItem[],
+  matchingAppIds: Set<string>,
+  hasActiveFilter: boolean
+): WebAppItem[] {
+  const bySlot = [...apps].sort((a, b) => a.slotIndex - b.slotIndex);
+  if (!hasActiveFilter) {
+    return bySlot;
+  }
+  const matched: WebAppItem[] = [];
+  const unmatched: WebAppItem[] = [];
+  for (const app of bySlot) {
+    if (matchingAppIds.has(app.id)) {
+      matched.push(app);
+    } else {
+      unmatched.push(app);
+    }
+  }
+  return [...matched, ...unmatched];
+}
+
+/**
+ * Splits the 40 slots into horizontal pages (e.g. 16 or 20 slots per page)
+ * for the zero-vertical-scroll Mobile / Tablet Swipe Carousel.
+ */
+export function paginateGridSlots<T = number>(
+  slotsOrTotal: T[] | number = TOTAL_GRID_SLOTS,
+  slotsPerPage: number = 16
+): T[][] {
+  if (typeof slotsOrTotal === 'number') {
+    const pages: number[][] = [];
+    for (let start = 0; start < slotsOrTotal; start += slotsPerPage) {
+      const page: number[] = [];
+      const end = Math.min(slotsOrTotal, start + slotsPerPage);
+      for (let i = start; i < end; i++) {
+        page.push(i);
+      }
+      pages.push(page);
+    }
+    return pages as unknown as T[][];
+  }
+
+  const pages: T[][] = [];
+  for (let start = 0; start < slotsOrTotal.length; start += slotsPerPage) {
+    pages.push(slotsOrTotal.slice(start, start + slotsPerPage));
+  }
+  return pages;
 }
 
 /**
@@ -427,15 +601,18 @@ export function sanitizeWebAppItem(
 
   const cleanName = (partial.name || 'Untitled App').trim().slice(0, 80);
   const cleanUrl = normalizeAppUrl(partial.url || 'https://example.com').slice(0, 500);
-  const cleanCategory = (partial.category || 'Utilitário').trim().slice(0, 40);
+  const cleanCategory = ((partial.category || 'Utilitário').trim().slice(0, 40) as WebAppItem['category']);
   const validAccent: AccentColor =
     partial.accentColor && partial.accentColor in ACCENT_COLOR_MAP
       ? partial.accentColor
       : 'indigo';
   const cleanCustomLogo = partial.customLogoUrl
-    ? normalizeAppUrl(partial.customLogoUrl).slice(0, 500)
+    ? partial.customLogoUrl === 'monogram://fallback'
+      ? 'monogram://fallback'
+      : normalizeAppUrl(partial.customLogoUrl).slice(0, 500)
     : '';
   const slotIndex = clampSlotIndex(partial.slotIndex ?? 0);
+  const openExternalOnly = Boolean(partial.openExternalOnly);
   const nowIso = new Date().toISOString();
 
   return {
@@ -447,8 +624,416 @@ export function sanitizeWebAppItem(
     accentColor: validAccent,
     customLogoUrl: cleanCustomLogo,
     slotIndex,
+    openExternalOnly,
     createdAt: partial.createdAt || nowIso,
     updatedAt: partial.updatedAt || nowIso,
+  };
+}
+
+/**
+ * Convenience wrapper used by AppFormModal to create/update an app with Auto-Swap.
+ */
+export function saveAppWithAutoSwap(
+  apps: WebAppItem[],
+  data: Omit<WebAppItem, 'id' | 'createdAt' | 'ownerId' | 'updatedAt'> & {
+    ownerId?: string;
+  },
+  existingId?: string
+): {
+  apps: WebAppItem[];
+  savedApp: WebAppItem;
+  swappedAppName?: string;
+  swappedToSlot?: number;
+} {
+  const existing = existingId ? apps.find((a) => a.id === existingId) : undefined;
+  const incoming = sanitizeWebAppItem(
+    {
+      ...data,
+      id: existingId || `app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    },
+    data.ownerId || existing?.ownerId || 'local'
+  );
+  const { updatedApps, swappedOccupant } = upsertAppWithAutoSwap(apps, incoming);
+  return {
+    apps: deduplicateSlots(updatedApps),
+    savedApp: incoming,
+    swappedAppName: swappedOccupant?.name,
+    swappedToSlot: swappedOccupant?.slotIndex,
+  };
+}
+
+/**
+ * Swaps two slot positions directly by slot index (0..39).
+ */
+export function swapSlotPositions(
+  apps: WebAppItem[],
+  sourceSlot: number,
+  targetSlot: number
+): WebAppItem[] {
+  const srcApp = apps.find((a) => a.slotIndex === sourceSlot);
+  if (!srcApp) return apps;
+  const { updatedApps } = moveOrSwapAppSlot(apps, srcApp.id, targetSlot);
+  return updatedApps;
+}
+
+/**
+ * Validates and sanitizes an imported or stored LauncherState payload.
+ */
+export function sanitizeLauncherPayload(
+  raw: unknown
+): import('../types/launcher').LauncherState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.apps)) return null;
+
+  const cleanApps = deduplicateSlots(
+    obj.apps
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => sanitizeWebAppItem(item as Partial<WebAppItem>))
+  );
+
+  const rawTheme = String(obj.wallpaperTheme || obj.theme || 'aurora');
+  const validTheme: import('../types/launcher').WallpaperTheme =
+    rawTheme === 'midnight' ||
+    rawTheme === 'cyber' ||
+    rawTheme === 'ocean' ||
+    rawTheme === 'aurora'
+      ? rawTheme
+      : 'aurora';
+
+  const rawMode = String(obj.viewMode || 'grid');
+  const validMode: import('../types/launcher').LauncherViewMode =
+    rawMode === 'sphere' ||
+    rawMode === 'pixel-studio' ||
+    rawMode === 'retro-os' ||
+    rawMode === 'grid'
+      ? rawMode
+      : 'grid';
+
+  const rawDensity = String(obj.gridDensity || obj.gridScale || 'normal');
+  const validDensity: import('../types/launcher').GridDensity =
+    rawDensity === 'compact' || rawDensity === 'expanded'
+      ? rawDensity
+      : 'normal';
+
+  return {
+    hubTitle: String(obj.hubTitle || 'My Web Creations Hub').slice(0, 80),
+    theme: validTheme,
+    wallpaperTheme: validTheme,
+    clickBehavior: obj.clickBehavior === 'new_tab' ? 'new_tab' : 'preview',
+    directLaunchMode: Boolean(obj.directLaunchMode),
+    viewMode: validMode,
+    gridDensity: validDensity,
+    cloudRestUrl: String(obj.cloudRestUrl || ''),
+    apps: cleanApps,
+    lastSyncedAt: typeof obj.lastSyncedAt === 'string' ? obj.lastSyncedAt : null,
+  };
+}
+
+/**
+ * Merges local and remote (Firestore/REST) app lists while guaranteeing:
+ * 1. Every user-registered or user-edited app (!isUnmodifiedDemoApp) from BOTH sources is preserved.
+ * 2. User custom apps claim their exact slotIndex first.
+ * 3. Any unmodified demo-app-* that collides with a user custom app's slotIndex (e.g. from an accidental re-seed)
+ *    is dropped and reported in `collidingDemoIdsToRemove` so it does not overwrite or displace the user's app.
+ */
+export function mergeAndRecoverApps(
+  localApps: WebAppItem[],
+  remoteApps: WebAppItem[]
+): {
+  apps: WebAppItem[];
+  localOnlyCustomApps: WebAppItem[];
+  collidingDemoIdsToRemove: string[];
+} {
+  const customByKey = new Map<string, WebAppItem>();
+  const remoteIds = new Set(remoteApps.map((a) => a.id));
+  const remoteUrlKeys = new Set(
+    remoteApps
+      .filter((a) => !isUnmodifiedDemoApp(a))
+      .map((a) => `${normalizeAppUrl(a.url).toLowerCase()}::${a.name.trim().toLowerCase()}`)
+  );
+
+  const localOnlyCustomApps: WebAppItem[] = [];
+
+  // 1. Collect all custom apps from remote first (authoritative cloud state)
+  for (const app of remoteApps) {
+    if (!isUnmodifiedDemoApp(app)) {
+      customByKey.set(app.id, app);
+    }
+  }
+
+  // 2. Collect any custom apps from local that aren't already in remote
+  for (const app of localApps) {
+    if (!isUnmodifiedDemoApp(app)) {
+      const urlKey = `${normalizeAppUrl(app.url).toLowerCase()}::${app.name.trim().toLowerCase()}`;
+      if (!customByKey.has(app.id) && !remoteUrlKeys.has(urlKey)) {
+        customByKey.set(app.id, app);
+        if (!remoteIds.has(app.id)) {
+          localOnlyCustomApps.push(app);
+        }
+      }
+    }
+  }
+
+  const allCustomApps = Array.from(customByKey.values());
+  const occupiedByCustom = new Set<number>(
+    allCustomApps.map((a) => clampSlotIndex(a.slotIndex))
+  );
+
+  // 3. Collect unmodified demo apps from remote (or local if remote is empty),
+  //    excluding any unmodified demo app that collides with a custom app's slotIndex
+  const sourceDemos = (remoteApps.length > 0 ? remoteApps : localApps).filter(
+    (a) => isUnmodifiedDemoApp(a)
+  );
+  const keptDemos: WebAppItem[] = [];
+  const keptDemoIds = new Set<string>();
+  const collidingDemoIdsToRemove: string[] = [];
+
+  for (const demo of sourceDemos) {
+    if (customByKey.has(demo.id) || keptDemoIds.has(demo.id)) {
+      continue;
+    }
+    const slot = clampSlotIndex(demo.slotIndex);
+    if (occupiedByCustom.has(slot)) {
+      collidingDemoIdsToRemove.push(demo.id);
+    } else {
+      keptDemoIds.add(demo.id);
+      keptDemos.push(demo);
+    }
+  }
+
+  const merged = deduplicateSlots([...allCustomApps, ...keptDemos]);
+  return {
+    apps: merged,
+    localOnlyCustomApps,
+    collidingDemoIdsToRemove,
+  };
+}
+
+/**
+ * Extracts valid WebAppItem objects from any parsed JSON structure stored in legacy localStorage keys.
+ */
+function extractAppsFromUnknownJson(parsed: unknown): {
+  apps: WebAppItem[];
+  hubTitle?: string;
+  wallpaperTheme?: import('../types/launcher').WallpaperTheme;
+  cloudRestUrl?: string;
+} {
+  if (!parsed || typeof parsed !== 'object') {
+    return { apps: [] };
+  }
+
+  let candidateArray: unknown[] = [];
+  let hubTitle: string | undefined;
+  let wallpaperTheme: import('../types/launcher').WallpaperTheme | undefined;
+  let cloudRestUrl: string | undefined;
+
+  if (Array.isArray(parsed)) {
+    candidateArray = parsed;
+  } else {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.apps)) candidateArray = obj.apps;
+    else if (Array.isArray(obj.items)) candidateArray = obj.items;
+    else if (Array.isArray(obj.webApps)) candidateArray = obj.webApps;
+    else if (Array.isArray(obj.slots)) candidateArray = obj.slots.filter(Boolean);
+
+    if (typeof obj.hubTitle === 'string' && obj.hubTitle.trim()) {
+      hubTitle = obj.hubTitle.trim().slice(0, 80);
+    }
+    const rawTheme = String(obj.wallpaperTheme || obj.theme || '');
+    if (
+      rawTheme === 'aurora' ||
+      rawTheme === 'midnight' ||
+      rawTheme === 'cyber' ||
+      rawTheme === 'ocean'
+    ) {
+      wallpaperTheme = rawTheme;
+    }
+    if (typeof obj.cloudRestUrl === 'string' && obj.cloudRestUrl.trim()) {
+      cloudRestUrl = obj.cloudRestUrl.trim();
+    }
+  }
+
+  const validApps: WebAppItem[] = [];
+  for (let i = 0; i < candidateArray.length; i++) {
+    const item = candidateArray[i];
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (
+      typeof rec.name === 'string' &&
+      rec.name.trim().length > 0 &&
+      typeof rec.url === 'string' &&
+      rec.url.trim().length > 0
+    ) {
+      validApps.push(
+        sanitizeWebAppItem({
+          id: typeof rec.id === 'string' ? rec.id : `recovered-${i}-${Date.now()}`,
+          ownerId: typeof rec.ownerId === 'string' ? rec.ownerId : 'local',
+          name: rec.name,
+          url: rec.url,
+          category:
+            typeof rec.category === 'string'
+              ? (rec.category as WebAppItem['category'])
+              : 'Utilitário',
+          accentColor:
+            typeof rec.accentColor === 'string'
+              ? (rec.accentColor as AccentColor)
+              : 'indigo',
+          customLogoUrl:
+            typeof rec.customLogoUrl === 'string' ? rec.customLogoUrl : '',
+          slotIndex:
+            typeof rec.slotIndex === 'number'
+              ? rec.slotIndex
+              : typeof rec.slot === 'number'
+                ? rec.slot
+                : i,
+          openExternalOnly: Boolean(rec.openExternalOnly),
+          createdAt:
+            typeof rec.createdAt === 'string'
+              ? rec.createdAt
+              : new Date().toISOString(),
+          updatedAt:
+            typeof rec.updatedAt === 'string'
+              ? rec.updatedAt
+              : new Date().toISOString(),
+        })
+      );
+    }
+  }
+
+  return {
+    apps: validApps,
+    hubTitle,
+    wallpaperTheme,
+    cloudRestUrl,
+  };
+}
+
+/**
+ * Scans all keys in browser localStorage (including legacy keys from earlier versions like
+ * Sonoma Web OS or v1 keys) and recovers any user-registered apps that were left behind
+ * when STORAGE_KEY changed to `my_web_creations_hub_v2`.
+ */
+export function loadAndRecoverStateFromLocalStorage(
+  primaryKey: string,
+  defaultDemoApps: WebAppItem[]
+): LauncherState {
+  let primaryState: LauncherState | null = null;
+  const legacyCustomApps: WebAppItem[] = [];
+  let bestLegacyState: LauncherState | null = null;
+  let discoveredRestUrl = '';
+
+  try {
+    const rawPrimary = localStorage.getItem(primaryKey);
+    if (rawPrimary) {
+      primaryState = sanitizeLauncherPayload(JSON.parse(rawPrimary));
+    }
+
+    // Scan every key in localStorage to find any user-created apps in legacy keys
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || key === primaryKey) continue;
+      if (key.startsWith('firebase:') || key.startsWith('vite-')) continue;
+
+      const rawVal = localStorage.getItem(key);
+      if (!rawVal) continue;
+
+      // Check if it's a plain URL for cloud endpoint
+      if (
+        !discoveredRestUrl &&
+        rawVal.startsWith('https://') &&
+        (key.includes('cloud') || key.includes('rest') || key.includes('endpoint'))
+      ) {
+        discoveredRestUrl = rawVal.trim();
+        continue;
+      }
+
+      if (!rawVal.startsWith('{') && !rawVal.startsWith('[')) continue;
+
+      try {
+        const parsed = JSON.parse(rawVal);
+        const extracted = extractAppsFromUnknownJson(parsed);
+        if (extracted.cloudRestUrl && !discoveredRestUrl) {
+          discoveredRestUrl = extracted.cloudRestUrl;
+        }
+        if (extracted.apps.length > 0) {
+          const customInKey = extracted.apps.filter(
+            (a) => !isUnmodifiedDemoApp(a)
+          );
+          for (const customApp of customInKey) {
+            legacyCustomApps.push(customApp);
+          }
+          if (
+            customInKey.length > 0 &&
+            (!bestLegacyState ||
+              customInKey.length >
+                bestLegacyState.apps.filter((a) => !isUnmodifiedDemoApp(a)).length)
+          ) {
+            const candidate = sanitizeLauncherPayload({
+              hubTitle: extracted.hubTitle || 'My Web Creations Hub',
+              wallpaperTheme: extracted.wallpaperTheme || 'aurora',
+              cloudRestUrl: extracted.cloudRestUrl || '',
+              apps: extracted.apps,
+            });
+            if (candidate) {
+              bestLegacyState = candidate;
+            }
+          }
+        }
+      } catch {
+        // Ignore non-JSON localStorage entries
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+
+  if (primaryState && primaryState.apps.length > 0) {
+    if (legacyCustomApps.length > 0) {
+      const { apps: mergedApps } = mergeAndRecoverApps(
+        legacyCustomApps,
+        primaryState.apps
+      );
+      return {
+        ...primaryState,
+        hubTitle:
+          primaryState.hubTitle === 'My Web Creations Hub' &&
+          bestLegacyState?.hubTitle
+            ? bestLegacyState.hubTitle
+            : primaryState.hubTitle,
+        cloudRestUrl:
+          primaryState.cloudRestUrl ||
+          bestLegacyState?.cloudRestUrl ||
+          discoveredRestUrl,
+        apps: mergedApps,
+      };
+    }
+    return primaryState;
+  }
+
+  if (bestLegacyState && bestLegacyState.apps.length > 0) {
+    const { apps: mergedApps } = mergeAndRecoverApps(
+      legacyCustomApps,
+      bestLegacyState.apps
+    );
+    return {
+      ...bestLegacyState,
+      cloudRestUrl: bestLegacyState.cloudRestUrl || discoveredRestUrl,
+      apps: mergedApps,
+    };
+  }
+
+  return {
+    hubTitle: 'My Web Creations Hub',
+    theme: 'aurora',
+    wallpaperTheme: 'aurora',
+    clickBehavior: 'preview',
+    directLaunchMode: false,
+    viewMode: 'grid',
+    gridDensity: 'normal',
+    cloudRestUrl: discoveredRestUrl,
+    apps: defaultDemoApps,
   };
 }
 
@@ -475,7 +1060,6 @@ export function generateHexSpiralCoordinates(
     { index: 0, q: 0, r: 0, ring: 0, x: 0, y: 0 },
   ];
 
-  // Axial direction vectors for traversing a hex ring
   const directions: [number, number][] = [
     [1, 0],
     [0, 1],
@@ -492,7 +1076,6 @@ export function generateHexSpiralCoordinates(
     for (let side = 0; side < 6 && results.length < count; side++) {
       const [dq, dr] = directions[side];
       for (let step = 0; step < ring && results.length < count; step++) {
-        // Pointy-top axial to 2D pixel conversion
         const x = spacing * (q + r * 0.5);
         const y = spacing * (r * (Math.sqrt(3) / 2));
         results.push({
@@ -552,11 +1135,9 @@ export function projectSphericalBubble(
     };
   }
 
-  // Clamp normalized radial distance so outer bubbles compress smoothly on the sphere horizon
   const clampedU = Math.min(u, 1.22);
   const angle = Math.min(clampedU, 1.05) * (Math.PI / 2);
 
-  // Spherical radial projection: sin(angle) curves outer rings inward like a 3D globe
   const projectedRadius =
     u <= 1.05
       ? safeRadius * Math.sin(angle) * 0.88
@@ -566,7 +1147,6 @@ export function projectSphericalBubble(
   const screenX = dx * ratio;
   const screenY = dy * ratio;
 
-  // Center bubbles are largest (~1.18x), tapering down to ~0.32x at the horizon edge
   const rawScale =
     u <= 1.08
       ? Math.cos(angle * 0.8) * 1.16 + 0.02
@@ -619,4 +1199,3 @@ export function computeSinglePageGridMetrics(
     visibleSlotCount,
   };
 }
-
